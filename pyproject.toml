@@ -1,0 +1,33 @@
+[project]
+name = "modmex"
+version = "1.0.0"
+description = "Lightweight Python models built on dataclasses with validation, serialization, and type-safe data mapping"
+authors = [
+    {name = "clandro89@gmail.com"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "orjson>=3.11.9,<4.0.0",
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.3"
+coverage = "^7.14.1"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.coverage.run]
+branch = true
+source = ["modmex"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
