@@ -34,10 +34,14 @@ jobs:
 
       - name: Run coverage
         if: matrix.python-version == '3.12'
-        run: poetry run pytest --cov --cov-branch --cov-report=xml
+        run: |
+          poetry run coverage run -m pytest
+          poetry run coverage report -m
+          poetry run coverage xml -o coverage.xml
 
       - name: Upload coverage reports to Codecov
         if: matrix.python-version == '3.12'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
