@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import sys
 import types
 import typing
@@ -18,6 +19,7 @@ from .errors import ValidationError
 
 GlobalNS_T = dict[str, Any]
 Loc = list[str | int]
+ValueValidator = Callable[[Any, Loc], Any]
 
 NoneType = type(None)
 _NONE_TYPES: tuple[Any, ...] = (None, NoneType, Literal[None])
@@ -175,6 +177,67 @@ def _validate_simple_type(expected_type: type[Any], value: Any, loc: Loc) -> Any
         raise _error(loc, f"Error instantiating {expected_type.__name__}: {exc}", "type_error") from exc
 
 
+def _compile_simple_type(expected_type: type[Any]) -> ValueValidator:
+    validator = _VALIDATORS.get(expected_type)
+    if validator is not None:
+
+        def validate_known_type(value: Any, loc: Loc) -> Any:
+            try:
+                return validator(value)
+            except ValueError as exc:
+                raise _error(loc, str(exc)) from exc
+
+        return validate_known_type
+
+    if expected_type is Any:
+        return lambda value, loc: value
+
+    if isinstance(expected_type, type) and issubclass(expected_type, Enum):
+
+        def validate_enum(value: Any, loc: Loc) -> Any:
+            if isinstance(value, expected_type):
+                return value
+            try:
+                return expected_type(value)
+            except ValueError as exc:
+                raise _error(loc, str(exc)) from exc
+
+        return validate_enum
+
+    if dataclasses.is_dataclass(expected_type):
+
+        def validate_dataclass(value: Any, loc: Loc) -> Any:
+            if isinstance(value, expected_type):
+                return value
+            if isinstance(value, Mapping):
+                try:
+                    return expected_type(**value)
+                except ValidationError as exc:
+                    raise _merge_nested_errors(loc, exc) from exc
+                except TypeError as exc:
+                    raise _error(loc, str(exc), "type_error") from exc
+            try:
+                return expected_type(value)
+            except ValueError as exc:
+                raise _error(loc, str(exc)) from exc
+            except TypeError as exc:
+                raise _error(loc, f"Error instantiating {expected_type.__name__}: {exc}", "type_error") from exc
+
+        return validate_dataclass
+
+    def validate_instance_or_coerce(value: Any, loc: Loc) -> Any:
+        if isinstance(value, expected_type):
+            return value
+        try:
+            return expected_type(value)
+        except ValueError as exc:
+            raise _error(loc, str(exc)) from exc
+        except TypeError as exc:
+            raise _error(loc, f"Error instantiating {expected_type.__name__}: {exc}", "type_error") from exc
+
+    return validate_instance_or_coerce
+
+
 def _validate_list(expected_type: Any, value: Any, strict: bool, globalns: GlobalNS_T, loc: Loc) -> list[Any]:
     if not isinstance(value, list):
         raise _error(loc, "must be a list", "type_error.list")
@@ -255,6 +318,146 @@ def _validate_union(expected_type: Any, value: Any, strict: bool, globalns: Glob
     raise _error(loc, f"must be an instance of {expected_type}, but received {value}", "type_error.union")
 
 
+def _compile_validator(expected_type: Any, strict: bool, globalns: GlobalNS_T) -> ValueValidator:
+    if isinstance(expected_type, str):
+        expected_type = typing.ForwardRef(expected_type)
+
+    if isinstance(expected_type, typing.ForwardRef):
+        expected_type = _evaluate_forward_reference(expected_type, globalns)
+
+    if is_none_type(expected_type):
+
+        def validate_none(value: Any, loc: Loc) -> None:
+            if value is None:
+                return None
+            raise _error(loc, f"{value} is not a valid none value", "value_error.none")
+
+        return validate_none
+
+    origin = get_origin(expected_type)
+    if origin is None:
+        if isinstance(expected_type, type):
+            return _compile_simple_type(expected_type)
+        if expected_type is Any:
+            return lambda value, loc: value
+        if strict:
+            raise RuntimeError(f"Unknown type of {expected_type}")
+        return lambda value, loc: value
+
+    if origin is list:
+        item_validator = _compile_validator(_first_arg(expected_type, Any), strict, globalns)
+
+        def validate_list(value: Any, loc: Loc) -> list[Any]:
+            if not isinstance(value, list):
+                raise _error(loc, "must be a list", "type_error.list")
+            return [item_validator(item, loc + [index]) for index, item in enumerate(value)]
+
+        return validate_list
+
+    if origin is tuple:
+        args = get_args(expected_type)
+        if not args:
+
+            def validate_tuple_any(value: Any, loc: Loc) -> tuple[Any, ...]:
+                if not isinstance(value, tuple):
+                    raise _error(loc, "must be a tuple", "type_error.tuple")
+                return value
+
+            return validate_tuple_any
+        if len(args) == 2 and args[1] is Ellipsis:
+            item_validator = _compile_validator(args[0], strict, globalns)
+
+            def validate_variable_tuple(value: Any, loc: Loc) -> tuple[Any, ...]:
+                if not isinstance(value, tuple):
+                    raise _error(loc, "must be a tuple", "type_error.tuple")
+                return tuple(item_validator(item, loc + [index]) for index, item in enumerate(value))
+
+            return validate_variable_tuple
+
+        item_validators = tuple(_compile_validator(item_type, strict, globalns) for item_type in args)
+
+        def validate_fixed_tuple(value: Any, loc: Loc) -> tuple[Any, ...]:
+            if not isinstance(value, tuple):
+                raise _error(loc, "must be a tuple", "type_error.tuple")
+            if len(item_validators) != len(value):
+                raise _error(loc, f"expected {len(item_validators)} items, received {len(value)}", "value_error.tuple.length")
+            return tuple(
+                item_validator(item, loc + [index])
+                for index, (item_validator, item) in enumerate(zip(item_validators, value))
+            )
+
+        return validate_fixed_tuple
+
+    if origin is dict:
+        key_type, value_type = _dict_args(expected_type)
+        key_validator = _compile_validator(key_type, strict, globalns)
+        value_validator = _compile_validator(value_type, strict, globalns)
+
+        def validate_dict(value: Any, loc: Loc) -> dict[Any, Any]:
+            if not isinstance(value, dict):
+                raise _error(loc, "must be a dict", "type_error.dict")
+            return {
+                key_validator(key, loc + [key]): value_validator(item, loc + [key])
+                for key, item in value.items()
+            }
+
+        return validate_dict
+
+    if origin is set:
+        item_validator = _compile_validator(_first_arg(expected_type, Any), strict, globalns)
+
+        def validate_set(value: Any, loc: Loc) -> set[Any]:
+            if not isinstance(value, set):
+                raise _error(loc, "must be a set", "type_error.set")
+            return {item_validator(item, loc + [index]) for index, item in enumerate(value)}
+
+        return validate_set
+
+    if origin is frozenset:
+        item_validator = _compile_validator(_first_arg(expected_type, Any), strict, globalns)
+
+        def validate_frozenset(value: Any, loc: Loc) -> frozenset[Any]:
+            if not isinstance(value, frozenset):
+                raise _error(loc, "must be a frozenset", "type_error.frozenset")
+            return frozenset(item_validator(item, loc + [index]) for index, item in enumerate(value))
+
+        return validate_frozenset
+
+    if origin is Literal:
+        allowed = get_args(expected_type)
+        values = ", ".join(map(str, allowed))
+
+        def validate_literal(value: Any, loc: Loc) -> Any:
+            if value not in allowed:
+                raise _error(loc, f"must be one of [{values}] but received {value}", "value_error.literal")
+            return value
+
+        return validate_literal
+
+    if origin in (typing.Union, types.UnionType):
+        item_validators = tuple(_compile_validator(item_type, strict, globalns) for item_type in get_args(expected_type))
+
+        def validate_union(value: Any, loc: Loc) -> Any:
+            errors: list[dict[str, Any]] = []
+            for item_validator in item_validators:
+                try:
+                    return item_validator(value, loc)
+                except ValidationError as exc:
+                    errors.extend(exc.errors)
+            if errors:
+                raise ValidationError(errors=errors)
+            raise _error(loc, f"must be an instance of {expected_type}, but received {value}", "type_error.union")
+
+        return validate_union
+
+    if origin in (Callable, CallableABC):
+        return lambda value, loc: callable_validator(value)
+
+    if strict:
+        raise RuntimeError(f"Unknown type of {expected_type}")
+    return lambda value, loc: value
+
+
 def _first_arg(expected_type: Any, default: Any) -> Any:
     args = get_args(expected_type)
     return args[0] if args else default
@@ -315,25 +518,33 @@ def _validate_types(expected_type: Any, value: Any, strict: bool, globalns: Glob
     return value
 
 
-def validate_model_fields(target: Any, strict: bool = False) -> None:
-    """Coerce and validate all dataclass fields on ``target`` in place."""
-    globalns = sys.modules[target.__module__].__dict__.copy()
+@functools.lru_cache(maxsize=None)
+def _validation_schema(model_cls: type[Any], strict: bool = False) -> tuple[tuple[str, ValueValidator], ...]:
+    globalns = sys.modules[model_cls.__module__].__dict__
     try:
-        type_hints = typing.get_type_hints(target.__class__, globalns=globalns, include_extras=True)
+        type_hints = typing.get_type_hints(model_cls, globalns=globalns, include_extras=True)
     except Exception:
         type_hints = {}
+    return tuple(
+        (field.name, _compile_validator(type_hints.get(field.name, field.type), strict, globalns))
+        for field in dataclasses.fields(model_cls)
+    )
+
+
+def validate_model_fields(target: Any, strict: bool = False) -> None:
+    """Coerce and validate all dataclass fields on ``target`` in place."""
+    validators = _validation_schema(type(target), strict)
     errors: list[dict[str, Any]] = []
 
-    for field in dataclasses.fields(target):
-        value = getattr(target, field.name)
-        expected_type = type_hints.get(field.name, field.type)
+    for field_name, validator in validators:
+        value = getattr(target, field_name)
         try:
-            validated = _validate_types(expected_type, value, strict, globalns, loc=[field.name])
-            setattr(target, field.name, validated)
+            validated = validator(value, [field_name])
+            setattr(target, field_name, validated)
         except ValidationError as exc:
             errors.extend(exc.errors)
         except Exception as exc:
-            errors.append({"loc": [field.name], "msg": str(exc), "type": "unexpected_error"})
+            errors.append({"loc": [field_name], "msg": str(exc), "type": "unexpected_error"})
 
     if errors:
         raise ValidationError(errors=errors)

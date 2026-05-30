@@ -44,16 +44,11 @@ def serialize_value(
     include_excluded: bool = False,
     type_serializers: TypeSerializers = None,
 ) -> Any:
-    value = _serialize_by_type(value, type_serializers)
+    if type_serializers:
+        value = _serialize_by_type(value, type_serializers)
+    elif value is None or type(value) in (str, int, float, bool):
+        return value
 
-    if hasattr(value, "model_dump") and callable(value.model_dump):
-        nested_exclude = None if exclude is True else exclude
-        return value.model_dump(
-            exclude=nested_exclude,
-            profile=profile,
-            include_excluded=include_excluded,
-            type_serializers=type_serializers,
-        )
     if isinstance(value, list):
         nested_exclude = None if exclude is True else exclude
         return [
@@ -91,6 +86,14 @@ def serialize_value(
             for key, item in value.items()
             if not excludes_entire_value(exclude_map.get(key))
         }
+    if hasattr(value, "model_dump") and callable(value.model_dump):
+        nested_exclude = None if exclude is True else exclude
+        return value.model_dump(
+            exclude=nested_exclude,
+            profile=profile,
+            include_excluded=include_excluded,
+            type_serializers=type_serializers,
+        )
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, date):

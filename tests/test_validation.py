@@ -178,22 +178,24 @@ def test_validate_model_fields_fallback_and_unexpected_error(monkeypatch: pytest
         amount: int
 
     original_get_type_hints = validation_module.typing.get_type_hints
-    original_validate_types = validation_module._validate_types
+    original_int_validator = validation_module._VALIDATORS[int]
+    validation_module._validation_schema.cache_clear()
 
     def raising_get_type_hints(*args: object, **kwargs: object) -> dict[str, object]:
         raise RuntimeError("boom")
 
-    def raising_validate_types(*args: object, **kwargs: object) -> object:
+    def raising_int_validator(value: object) -> object:
         raise RuntimeError("unexpected")
 
     monkeypatch.setattr(validation_module.typing, "get_type_hints", raising_get_type_hints)
-    monkeypatch.setattr(validation_module, "_validate_types", raising_validate_types)
+    validation_module._VALIDATORS[int] = raising_int_validator
 
     try:
         with pytest.raises(ValidationError) as exc_info:
             validate_model_fields(Raw(amount=1))
     finally:
         monkeypatch.setattr(validation_module.typing, "get_type_hints", original_get_type_hints)
-        monkeypatch.setattr(validation_module, "_validate_types", original_validate_types)
+        validation_module._VALIDATORS[int] = original_int_validator
+        validation_module._validation_schema.cache_clear()
 
     assert exc_info.value.errors[0]["type"] == "unexpected_error"
