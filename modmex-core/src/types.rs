@@ -20,12 +20,11 @@ pub(crate) const NODE_LITERAL: u8 = 15;
 pub(crate) const NODE_ANY: u8 = 16;
 
 pub(crate) enum Validator {
-    Scalar(u8),
+    Scalar(ScalarValidator),
     Enum(Py<PyAny>),
     Model {
         model_type: Py<PyAny>,
-        trusted_ctor: Py<PyAny>,
-        core: Py<PyAny>,
+        core: Py<ModelCore>,
     },
     List(Box<Validator>),
     DictStr(Box<Validator>),
@@ -34,8 +33,13 @@ pub(crate) enum Validator {
     Any,
 }
 
+pub(crate) struct ScalarValidator {
+    pub(crate) kind: u8,
+    pub(crate) helper: Option<Py<PyAny>>,
+}
+
 pub(crate) struct FieldSpec {
-    pub(crate) name: String,
+    pub(crate) py_name: Py<PyString>,
     pub(crate) required: bool,
     pub(crate) default: Option<Py<PyAny>>,
     pub(crate) default_factory: Option<Py<PyAny>>,
@@ -45,6 +49,7 @@ pub(crate) struct FieldSpec {
 #[pyclass]
 pub(crate) struct ModelCore {
     pub(crate) model_type: Py<PyAny>,
+    pub(crate) new_func: Py<PyAny>,
     pub(crate) fields: Vec<FieldSpec>,
 }
 
