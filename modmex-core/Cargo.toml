@@ -1,0 +1,16 @@
+[package]
+name = "_modmex_rust"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "_modmex_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22.6", features = ["extension-module"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true

@@ -178,22 +178,142 @@ def test_validate_model_fields_fallback_and_unexpected_error(monkeypatch: pytest
         amount: int
 
     original_get_type_hints = validation_module.typing.get_type_hints
-    original_validate_types = validation_module._validate_types
+    original_int_validator = validation_module._VALIDATORS[int]
+    validation_module._validation_schema.cache_clear()
 
     def raising_get_type_hints(*args: object, **kwargs: object) -> dict[str, object]:
         raise RuntimeError("boom")
 
-    def raising_validate_types(*args: object, **kwargs: object) -> object:
+    def raising_int_validator(value: object) -> object:
         raise RuntimeError("unexpected")
 
     monkeypatch.setattr(validation_module.typing, "get_type_hints", raising_get_type_hints)
-    monkeypatch.setattr(validation_module, "_validate_types", raising_validate_types)
+    validation_module._VALIDATORS[int] = raising_int_validator
 
     try:
         with pytest.raises(ValidationError) as exc_info:
             validate_model_fields(Raw(amount=1))
     finally:
         monkeypatch.setattr(validation_module.typing, "get_type_hints", original_get_type_hints)
-        monkeypatch.setattr(validation_module, "_validate_types", original_validate_types)
+        validation_module._VALIDATORS[int] = original_int_validator
+        validation_module._validation_schema.cache_clear()
 
     assert exc_info.value.errors[0]["type"] == "unexpected_error"
+
+
+def test_compile_validator_and_compile_simple_type_branch_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    globalns = globals().copy()
+
+    @validation_module.dataclasses.dataclass
+    class Pair:
+        left: int
+        right: int
+
+    @validation_module.dataclasses.dataclass
+    class StrictValue:
+        value: Any
+
+        def __post_init__(self) -> None:
+            if self.value == "boom":
+                raise ValueError("boom")
+
+    class Coercible:
+        def __init__(self, value: object) -> None:
+            if value == "bad":
+                raise ValueError("bad")
+            if value is None:
+                raise TypeError("missing")
+            self.value = int(value)
+
+    class ChildType(BaseModel):
+        code: int
+
+    dataclass_validator = validation_module._compile_simple_type(ChildType)
+    child = ChildType(code=1)
+    assert dataclass_validator(child, ["child"]) is child
+    assert dataclass_validator({"code": "2"}, ["child"]).code == 2
+
+    with pytest.raises(ValidationError, match="code"):
+        dataclass_validator({}, ["child"])
+
+    pair_validator = validation_module._compile_simple_type(Pair)
+    with pytest.raises(ValidationError, match="Error instantiating Pair"):
+        pair_validator("x", ["pair"])
+
+    strict_validator = validation_module._compile_simple_type(StrictValue)
+    with pytest.raises(ValidationError, match="boom"):
+        strict_validator("boom", ["strict"])
+
+    coercible_validator = validation_module._compile_simple_type(Coercible)
+    existing = Coercible(1)
+    assert coercible_validator(existing, ["coerce"]) is existing
+    assert coercible_validator("2", ["coerce"]).value == 2
+    with pytest.raises(ValidationError, match="bad"):
+        coercible_validator("bad", ["coerce"])
+    with pytest.raises(ValidationError, match="Error instantiating Coercible"):
+        coercible_validator(None, ["coerce"])
+
+    any_validator = validation_module._compile_simple_type(Any)
+    token = object()
+    assert any_validator(token, ["any"]) is token
+
+    assert validation_module._compile_validator(validation_module.Any, strict=False, globalns=globalns)("v", ["a"]) == "v"
+    with monkeypatch.context() as patch_ctx:
+        sentinel_any = object()
+        patch_ctx.setattr(validation_module, "Any", sentinel_any)
+        assert validation_module._compile_validator(sentinel_any, strict=False, globalns=globalns)("v", ["a"]) == "v"
+    assert validation_module._compile_validator(123, strict=False, globalns=globalns)("v", ["a"]) == "v"
+    with pytest.raises(RuntimeError, match="Unknown type"):
+        validation_module._compile_validator(123, strict=True, globalns=globalns)
+
+    list_validator = validation_module._compile_validator(list[int], strict=False, globalns=globalns)
+    with pytest.raises(ValidationError, match="must be a list"):
+        list_validator((1,), ["list"])
+
+    with monkeypatch.context() as patch_ctx:
+        patch_ctx.setattr(validation_module, "get_args", lambda _tp: ())
+        tuple_any_validator = validation_module._compile_validator(tuple[int], strict=False, globalns=globalns)
+        assert tuple_any_validator((1, "x"), ["tuple-any"]) == (1, "x")
+        with pytest.raises(ValidationError, match="must be a tuple"):
+            tuple_any_validator([1, 2], ["tuple-any"])
+
+    tuple_var_validator = validation_module._compile_validator(tuple[int, ...], strict=False, globalns=globalns)
+    assert tuple_var_validator(("1", 2), ["tuple-var"]) == (1, 2)
+    with pytest.raises(ValidationError, match="must be a tuple"):
+        tuple_var_validator([1], ["tuple-var"])
+
+    tuple_fixed_validator = validation_module._compile_validator(tuple[int, str], strict=False, globalns=globalns)
+    assert tuple_fixed_validator(("1", 2), ["tuple-fixed"]) == (1, "2")
+    with pytest.raises(ValidationError, match="expected 2 items"):
+        tuple_fixed_validator((1,), ["tuple-fixed"])
+    with pytest.raises(ValidationError, match="must be a tuple"):
+        tuple_fixed_validator([1, "x"], ["tuple-fixed"])
+
+    dict_validator = validation_module._compile_validator(dict[str, int], strict=False, globalns=globalns)
+    with pytest.raises(ValidationError, match="must be a dict"):
+        dict_validator([], ["dict"])
+
+    set_validator = validation_module._compile_validator(set[int], strict=False, globalns=globalns)
+    assert set_validator({"1", 2}, ["set"]) == {1, 2}
+    with pytest.raises(ValidationError, match="must be a set"):
+        set_validator([], ["set"])
+
+    frozenset_validator = validation_module._compile_validator(frozenset[int], strict=False, globalns=globalns)
+    with pytest.raises(ValidationError, match="must be a frozenset"):
+        frozenset_validator({1}, ["fset"])
+
+    with monkeypatch.context() as patch_ctx:
+        patch_ctx.setattr(validation_module, "get_args", lambda _tp: ())
+        empty_union_validator = validation_module._compile_validator(int | str, strict=False, globalns=globalns)
+    with pytest.raises(ValidationError, match="must be an instance"):
+        empty_union_validator("x", ["union"])
+
+    tvar = TypeVar("tvar")
+
+    class UnknownOrigin(Generic[tvar]):
+        pass
+
+    unknown_validator = validation_module._compile_validator(UnknownOrigin[int], strict=False, globalns=globalns)
+    assert unknown_validator("value", ["unknown"]) == "value"
+    with pytest.raises(RuntimeError, match="Unknown type"):
+        validation_module._compile_validator(UnknownOrigin[int], strict=True, globalns=globalns)
