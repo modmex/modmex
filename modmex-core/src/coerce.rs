@@ -1,6 +1,6 @@
 use crate::types::*;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyBytes, PyDelta, PyFloat, PyInt, PyString, PyTime};
+use pyo3::types::{PyAny, PyBool, PyBytes, PyFloat, PyInt, PyString};
 
 pub(crate) fn coerce_str_impl(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     if value.is_none() {
@@ -234,7 +234,8 @@ pub(crate) fn coerce_duration_with_helper(
             && micros >= i32::MIN as f64
             && micros <= i32::MAX as f64
         {
-            return Ok(PyDelta::new_bound(py, 0, whole as i32, micros as i32, true)?.into_py(py));
+            let timedelta = py.import_bound("datetime")?.getattr("timedelta")?;
+            return Ok(timedelta.call1((0, whole as i32, micros as i32, true))?.into_py(py));
         }
         let cls = if let Some(helper) = helper {
             helper.clone()
@@ -309,9 +310,8 @@ fn parse_time_ascii(py: Python<'_>, bytes: &[u8]) -> PyResult<Option<Py<PyAny>>>
         return Ok(None);
     }
 
-    Ok(Some(
-        PyTime::new_bound(py, hour, minute, second, microsecond, None)?.into_py(py),
-    ))
+    let time_cls = py.import_bound("datetime")?.getattr("time")?;
+    Ok(Some(time_cls.call1((hour, minute, second, microsecond))?.into_py(py)))
 }
 
 pub(crate) fn coerce_decimal_with_helper(
