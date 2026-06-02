@@ -4,22 +4,26 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import re
 import sys
 import types
 import typing
 from collections.abc import Callable as CallableABC
 from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal, DecimalException
+from decimal import Decimal, DecimalException, InvalidOperation
 from enum import Enum
 from typing import Any, Callable, Literal, get_args, get_origin
 
 from .datetime_parser import parse_date, parse_datetime, parse_duration, parse_time
 from .errors import ValidationError
+from .fields import field_constraints
 
 GlobalNS_T = dict[str, Any]
 Loc = list[str | int]
 ValueValidator = Callable[[Any, Loc], Any]
+ConstraintValidator = Callable[[Any, Loc], None]
+ConstraintValidators = tuple[ConstraintValidator, ...]
 
 NoneType = type(None)
 _NONE_TYPES: tuple[Any, ...] = (None, NoneType, Literal[None])
@@ -519,16 +523,126 @@ def _validate_types(expected_type: Any, value: Any, strict: bool, globalns: Glob
 
 
 @functools.lru_cache(maxsize=None)
-def _validation_schema(model_cls: type[Any], strict: bool = False) -> tuple[tuple[str, ValueValidator], ...]:
+def _validation_schema(
+    model_cls: type[Any],
+    strict: bool = False,
+) -> tuple[tuple[str, ValueValidator, ConstraintValidators], ...]:
     globalns = sys.modules[model_cls.__module__].__dict__
     try:
         type_hints = typing.get_type_hints(model_cls, globalns=globalns, include_extras=True)
     except Exception:
         type_hints = {}
     return tuple(
-        (field.name, _compile_validator(type_hints.get(field.name, field.type), strict, globalns))
+        (
+            field.name,
+            _compile_validator(type_hints.get(field.name, field.type), strict, globalns),
+            _compile_constraints(field),
+        )
         for field in dataclasses.fields(model_cls)
     )
+
+
+def _compile_constraints(field: dataclasses.Field[Any]) -> ConstraintValidators:
+    constraints = field_constraints(field)
+    gt = constraints.get("gt")
+    ge = constraints.get("ge")
+    lt = constraints.get("lt")
+    le = constraints.get("le")
+    min_length = constraints.get("min_length")
+    max_length = constraints.get("max_length")
+    pattern = constraints.get("pattern")
+    multiple_of = constraints.get("multiple_of")
+    max_digits = constraints.get("max_digits")
+    decimal_places = constraints.get("decimal_places")
+
+    regex = re.compile(pattern) if pattern is not None else None
+
+    if all(
+        constraint is None
+        for constraint in (
+            gt,
+            ge,
+            lt,
+            le,
+            min_length,
+            max_length,
+            pattern,
+            multiple_of,
+            max_digits,
+            decimal_places,
+        )
+    ):
+        return ()
+
+    def validate_constraints(value: Any, loc: Loc) -> None:
+        if gt is not None and not value > gt:
+            raise _error(loc, f"must be > {gt}", "value_error.number.not_gt")
+        if ge is not None and not value >= ge:
+            raise _error(loc, f"must be >= {ge}", "value_error.number.not_ge")
+        if lt is not None and not value < lt:
+            raise _error(loc, f"must be < {lt}", "value_error.number.not_lt")
+        if le is not None and not value <= le:
+            raise _error(loc, f"must be <= {le}", "value_error.number.not_le")
+
+        if min_length is not None or max_length is not None:
+            try:
+                current_length = len(value)
+            except TypeError as exc:
+                raise _error(loc, "value has no length", "type_error.length") from exc
+
+            if min_length is not None and current_length < min_length:
+                raise _error(loc, f"length must be >= {min_length}", "value_error.any_str.min_length")
+            if max_length is not None and current_length > max_length:
+                raise _error(loc, f"length must be <= {max_length}", "value_error.any_str.max_length")
+
+        if regex is not None:
+            if not isinstance(value, str):
+                raise _error(loc, "value must be a string for pattern validation", "type_error.pattern")
+            if regex.search(value) is None:
+                raise _error(loc, f"must match pattern '{pattern}'", "value_error.str.pattern")
+
+        if multiple_of is not None:
+            try:
+                value_decimal = Decimal(str(value))
+                multiple_decimal = Decimal(str(multiple_of))
+                if value_decimal % multiple_decimal != 0:
+                    raise _error(loc, f"must be a multiple of {multiple_of}", "value_error.number.not_multiple_of")
+            except (InvalidOperation, ValueError) as exc:
+                if isinstance(exc, ValidationError):
+                    raise
+                raise _error(loc, "value must be numeric for multiple_of", "type_error.number") from exc
+
+        if max_digits is not None or decimal_places is not None:
+            try:
+                decimal_value = Decimal(str(value))
+            except (InvalidOperation, ValueError) as exc:
+                raise _error(loc, "value must be numeric for decimal constraints", "type_error.decimal") from exc
+
+            if decimal_value.is_zero():
+                digits_count = 1
+                decimals_count = 0
+            else:
+                sign, digits, exponent = decimal_value.as_tuple()
+                digits_count = len(digits)
+                decimals_count = -exponent if exponent < 0 else 0
+                if exponent > 0:
+                    digits_count += exponent
+
+            if max_digits is not None and digits_count > max_digits:
+                raise _error(loc, f"must have at most {max_digits} digits", "value_error.decimal.max_digits")
+            if decimal_places is not None and decimals_count > decimal_places:
+                raise _error(
+                    loc,
+                    f"must have at most {decimal_places} decimal places",
+                    "value_error.decimal.max_places",
+                )
+
+    return (validate_constraints,)
+
+
+def _apply_constraints(value: Any, loc: Loc, constraints: ConstraintValidators) -> None:
+    for constraint_validator in constraints:
+        constraint_validator(value, loc)
 
 
 def validate_model_fields(target: Any, strict: bool = False) -> None:
@@ -536,11 +650,37 @@ def validate_model_fields(target: Any, strict: bool = False) -> None:
     validators = _validation_schema(type(target), strict)
     errors: list[dict[str, Any]] = []
 
-    for field_name, validator in validators:
+    for field_name, validator, constraints in validators:
         value = getattr(target, field_name)
         try:
             validated = validator(value, [field_name])
+            _apply_constraints(validated, [field_name], constraints)
             setattr(target, field_name, validated)
+        except ValidationError as exc:
+            errors.extend(exc.errors)
+        except Exception as exc:
+            errors.append({"loc": [field_name], "msg": str(exc), "type": "unexpected_error"})
+
+    if errors:
+        raise ValidationError(errors=errors)
+
+
+@functools.lru_cache(maxsize=None)
+def _constraint_schema(model_cls: type[Any]) -> tuple[tuple[str, ConstraintValidators], ...]:
+    return tuple((field.name, _compile_constraints(field)) for field in dataclasses.fields(model_cls))
+
+
+def validate_model_constraints(target: Any) -> None:
+    """Validate only declared field constraints on ``target`` in place."""
+    constraints_schema = _constraint_schema(type(target))
+    errors: list[dict[str, Any]] = []
+
+    for field_name, constraints in constraints_schema:
+        if not constraints:
+            continue
+        value = getattr(target, field_name)
+        try:
+            _apply_constraints(value, [field_name], constraints)
         except ValidationError as exc:
             errors.extend(exc.errors)
         except Exception as exc:

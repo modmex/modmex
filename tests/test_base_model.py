@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import field
+from dataclasses import field, fields
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
+import warnings
 from typing import Literal, Optional
 
 import pytest
@@ -317,3 +318,135 @@ def test_model_validator_can_return_none_without_modifying_state() -> None:
 
     assert item.name == "tea"
     assert item.calls == 1
+
+
+def test_alias_is_applied_for_input_and_output() -> None:
+    class AliasedUser(BaseModel):
+        first_name: str = Field(alias="firstName")
+
+    user = AliasedUser(firstName="Ana")
+
+    assert user.first_name == "Ana"
+    assert user.model_dump() == {"firstName": "Ana"}
+
+
+def test_validation_alias_is_only_for_input() -> None:
+    class InboundUser(BaseModel):
+        first_name: str = Field(validation_alias="firstName")
+
+    user = InboundUser(firstName="Ana")
+
+    assert user.first_name == "Ana"
+    assert user.model_dump() == {"first_name": "Ana"}
+
+
+def test_serialization_alias_is_only_for_output() -> None:
+    class OutboundUser(BaseModel):
+        first_name: str = Field(serialization_alias="firstName")
+
+    user = OutboundUser(first_name="Ana")
+
+    assert user.first_name == "Ana"
+    assert user.model_dump() == {"firstName": "Ana"}
+
+
+def test_field_name_wins_when_alias_and_field_are_both_provided() -> None:
+    class ConflictUser(BaseModel):
+        first_name: str = Field(alias="firstName")
+
+    user = ConflictUser(first_name="Internal", firstName="External")
+
+    assert user.first_name == "Internal"
+
+
+def test_validation_constraints_are_enforced() -> None:
+    class ConstrainedModel(BaseModel):
+        qty: int = Field(gt=0, le=5)
+        name: str = Field(min_length=2, max_length=5)
+
+    model = ConstrainedModel(qty=3, name="Ana")
+
+    assert model.qty == 3
+    assert model.name == "Ana"
+
+    with pytest.raises(ValidationError) as gt_error:
+        ConstrainedModel(qty=0, name="Ana")
+    assert any(error["loc"] == ["qty"] for error in gt_error.value.errors)
+
+    with pytest.raises(ValidationError) as len_error:
+        ConstrainedModel(qty=2, name="A")
+    assert any(error["loc"] == ["name"] for error in len_error.value.errors)
+
+
+def test_field_stores_openapi_metadata() -> None:
+    class DocumentedModel(BaseModel):
+        name: str = Field(
+            title="User name",
+            description="Display name for the user",
+            examples=["Ana"],
+        )
+
+    name_field = next(model_field for model_field in fields(DocumentedModel) if model_field.name == "name")
+
+    assert name_field.metadata["__modmex_title__"] == "User name"
+    assert name_field.metadata["__modmex_description__"] == "Display name for the user"
+    assert name_field.metadata["__modmex_examples__"] == ("Ana",)
+
+
+def test_phase_two_constraints_are_enforced() -> None:
+    class AdvancedModel(BaseModel):
+        code: str = Field(pattern=r"^[A-Z]{2}-\d{3}$")
+        qty: int = Field(multiple_of=5)
+        price: Decimal = Field(max_digits=6, decimal_places=2)
+
+    model = AdvancedModel(code="AB-123", qty=10, price="1234.56")
+
+    assert model.code == "AB-123"
+    assert model.qty == 10
+    assert model.price == Decimal("1234.56")
+
+    with pytest.raises(ValidationError) as pattern_error:
+        AdvancedModel(code="abc", qty=10, price="1234.56")
+    assert any(error["loc"] == ["code"] for error in pattern_error.value.errors)
+
+    with pytest.raises(ValidationError) as multiple_error:
+        AdvancedModel(code="AB-123", qty=11, price="1234.56")
+    assert any(error["loc"] == ["qty"] for error in multiple_error.value.errors)
+
+    with pytest.raises(ValidationError) as decimal_error:
+        AdvancedModel(code="AB-123", qty=10, price="12345.678")
+    assert any(error["loc"] == ["price"] for error in decimal_error.value.errors)
+
+
+def test_frozen_field_cannot_be_modified_after_init() -> None:
+    class FrozenModel(BaseModel):
+        id: int = Field(frozen=True)
+        name: str
+
+    model = FrozenModel(id=1, name="Ana")
+
+    with pytest.raises(AttributeError, match="frozen"):
+        model.id = 2
+
+    model.name = "Ana Maria"
+    assert model.name == "Ana Maria"
+
+
+def test_deprecated_field_emits_warning_once_per_instance() -> None:
+    class DeprecatedModel(BaseModel):
+        old_name: str = Field(deprecated="old_name is deprecated")
+
+    model = DeprecatedModel(old_name="Ana")
+    
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always", DeprecationWarning)
+        _ = model.old_name
+        _ = model.old_name
+
+    deprecation_messages = [
+        warning
+        for warning in captured
+        if isinstance(warning.message, DeprecationWarning)
+        or warning.category is DeprecationWarning
+    ]
+    assert len(deprecation_messages) == 1

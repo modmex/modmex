@@ -50,6 +50,7 @@ def _build_dump_plan(
     model_fields: tuple[DataclassField[Any], ...],
     base_model_type: type[Any],
     profile: str | None = None,
+    output_name_map: dict[str, str] | None = None,
 ) -> Callable[[Any], dict[str, Any]] | None:
     globalns = sys.modules[model_cls.__module__].__dict__
     try:
@@ -68,19 +69,20 @@ def _build_dump_plan(
         default_fast_types = (datetime, date, time, timedelta, Decimal)
         has_serialized_default = field.default is not MISSING and field_type in default_fast_types
         serialized_default = serialize_value(field.default) if has_serialized_default else None
-        output_items.append((field.name, serializer, has_serialized_default, field.default, serialized_default))
+        output_name = output_name_map.get(field.name, field.name) if output_name_map else field.name
+        output_items.append((output_name, field.name, serializer, has_serialized_default, field.default, serialized_default))
 
     property_names = tuple(getattr(model_cls, "__modmex_properties__", ()))
 
     def dump(self: Any) -> dict[str, Any]:
         result: dict[str, Any] = {}
         state = self.__dict__
-        for field_name, serializer, has_serialized_default, default, serialized_default in output_items:
+        for output_name, field_name, serializer, has_serialized_default, default, serialized_default in output_items:
             value = state[field_name]
             if has_serialized_default and value == default:
-                result[field_name] = serialized_default
+                result[output_name] = serialized_default
             else:
-                result[field_name] = serializer(value)
+                result[output_name] = serializer(value)
         for attr_name in property_names:
             value = getattr(self, attr_name)
             result[attr_name] = value if value is None or type(value) in (str, int, float, bool) else serialize_value(value)
@@ -170,12 +172,20 @@ def _dump_plan_for(
     model_cls: type[Any],
     profile: str | None,
     base_model_type: type[Any],
+    output_name_map: dict[str, str] | None = None,
 ) -> Callable[[Any], dict[str, Any]] | None:
-    cache = getattr(model_cls, "__modmex_dump_plan_cache__", None)
+    cache_attr = "__modmex_dump_plan_cache__" if output_name_map is None else "__modmex_dump_plan_alias_cache__"
+    cache = getattr(model_cls, cache_attr, None)
     if cache is None:
         return None
     if profile not in cache:
-        cache[profile] = _build_dump_plan(model_cls, model_cls.__modmex_fields__, base_model_type, profile)
+        cache[profile] = _build_dump_plan(
+            model_cls,
+            model_cls.__modmex_fields__,
+            base_model_type,
+            profile,
+            output_name_map,
+        )
     return cache[profile]
 
 
