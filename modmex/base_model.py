@@ -5,12 +5,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import MISSING, dataclass, fields
 from typing import Any, Callable
+import warnings
 
 import orjson
 
 from .fields import (
     field_alias,
     field_constraints,
+    field_deprecated,
+    field_frozen,
     field_serialization_alias,
     field_validation_aliases,
     should_exclude_field,
@@ -67,13 +70,21 @@ class BaseModelMeta(type):
         model_cls.__modmex_field_names__ = {field.name for field in model_fields}
         validation_alias_map: dict[str, str] = {}
         serialization_name_map: dict[str, str] = {}
+        deprecated_fields: dict[str, str | bool] = {}
+        frozen_fields: set[str] = set()
         has_constraints = False
         for field in model_fields:
             alias = field_alias(field)
             validation_aliases = field_validation_aliases(field)
             constraints = field_constraints(field)
+            deprecated = field_deprecated(field)
+            frozen = field_frozen(field)
             if any(value is not None for value in constraints.values()):
                 has_constraints = True
+            if deprecated:
+                deprecated_fields[field.name] = deprecated
+            if frozen:
+                frozen_fields.add(field.name)
             input_aliases = validation_aliases or ((alias,) if alias else ())
             for alias_name in input_aliases:
                 if alias_name == field.name:
@@ -94,9 +105,12 @@ class BaseModelMeta(type):
             output_name != field_name
             for field_name, output_name in serialization_name_map.items()
         )
+        model_cls.__modmex_deprecated_fields__ = deprecated_fields
+        model_cls.__modmex_frozen_fields__ = frozenset(frozen_fields)
         model_cls.__modmex_has_constraints__ = has_constraints
         model_cls.__modmex_dump_field_cache__ = {}
         model_cls.__modmex_dump_plan_cache__ = {}
+        model_cls.__modmex_dump_plan_alias_cache__ = {}
         model_cls.__modmex_properties__ = tuple(
             attr_name
             for attr_name in dir(model_cls)
@@ -146,6 +160,7 @@ class BaseModelMeta(type):
         validation_alias_map = model_cls.__modmex_validation_alias_map__
         has_validation_aliases = model_cls.__modmex_has_validation_aliases__
         has_constraints = model_cls.__modmex_has_constraints__
+        model_frozen_fields = model_cls.__modmex_frozen_fields__
 
         def new_init(self: Any, *args: Any, **kwargs: Any) -> None:
             normalized_kwargs = kwargs
@@ -167,6 +182,40 @@ class BaseModelMeta(type):
                 key: value for key, value in normalized_kwargs.items() if key in field_names
             }
             original_init(self, *args, **filtered_kwargs)
+
+        if model_frozen_fields:
+            original_setattr = model_cls.__setattr__
+
+            def new_setattr(self: Any, name: str, value: Any) -> None:
+                if name in model_frozen_fields and name in self.__dict__:
+                    raise AttributeError(f"Field '{name}' is frozen and cannot be modified")
+                original_setattr(self, name, value)
+
+            model_cls.__setattr__ = new_setattr
+
+        if deprecated_fields:
+            original_getattribute = model_cls.__getattribute__
+
+            def new_getattribute(self: Any, name: str) -> Any:
+                value = original_getattribute(self, name)
+                deprecated = deprecated_fields.get(name)
+                if deprecated:
+                    state = original_getattribute(self, "__dict__")
+                    warned = state.get("__modmex_deprecation_warned__")
+                    if warned is None:
+                        warned = set()
+                        state["__modmex_deprecation_warned__"] = warned
+                    if name not in warned:
+                        message = (
+                            deprecated
+                            if isinstance(deprecated, str)
+                            else f"Field '{name}' is deprecated"
+                        )
+                        warnings.warn(message, DeprecationWarning, stacklevel=2)
+                        warned.add(name)
+                return value
+
+            model_cls.__getattribute__ = new_getattribute
 
         model_cls.__init__ = new_init
         return model_cls
@@ -229,16 +278,24 @@ class BaseModel(metaclass=BaseModelMeta):
         has_serialization_aliases = type(self).__modmex_has_serialization_aliases__
         serialization_name_map = type(self).__modmex_serialization_name_map__
 
-        if exclude is None and profile is None and not include_excluded and not type_serializers and not has_serialization_aliases:
-            dump_plan = type(self).__modmex_dump_plan__
-            if dump_plan is not None:
-                return dump_plan(self)
-        if exclude is None and profile is not None and not include_excluded and not type_serializers and not has_serialization_aliases:
-            dump_plan = _dump_plan_for(
-                type(self),
-                profile,
-                type(self).__modmex_base_model_type__,
-            )
+        if exclude is None and not include_excluded and not type_serializers:
+            if not has_serialization_aliases:
+                dump_plan = (
+                    type(self).__modmex_dump_plan__
+                    if profile is None
+                    else _dump_plan_for(
+                        type(self),
+                        profile,
+                        type(self).__modmex_base_model_type__,
+                    )
+                )
+            else:
+                dump_plan = _dump_plan_for(
+                    type(self),
+                    profile,
+                    type(self).__modmex_base_model_type__,
+                    serialization_name_map,
+                )
             if dump_plan is not None:
                 return dump_plan(self)
         exclude_map = normalize_exclude(exclude)
@@ -276,28 +333,25 @@ class BaseModel(metaclass=BaseModelMeta):
         include_excluded: bool = False,
         type_serializers: TypeSerializers = None,
     ) -> dict[str, Any]:
-        if (
-            exclude is None
-            and profile is None
-            and not include_excluded
-            and not type_serializers
-            and not type(self).__modmex_has_serialization_aliases__
-        ):
-            dump_plan = type(self).__modmex_dump_plan__
-            if dump_plan is not None:
-                return dump_plan(self)
-        if (
-            exclude is None
-            and profile is not None
-            and not include_excluded
-            and not type_serializers
-            and not type(self).__modmex_has_serialization_aliases__
-        ):
-            dump_plan = _dump_plan_for(
-                type(self),
-                profile,
-                type(self).__modmex_base_model_type__,
-            )
+        if exclude is None and not include_excluded and not type_serializers:
+            has_serialization_aliases = type(self).__modmex_has_serialization_aliases__
+            if not has_serialization_aliases:
+                dump_plan = (
+                    type(self).__modmex_dump_plan__
+                    if profile is None
+                    else _dump_plan_for(
+                        type(self),
+                        profile,
+                        type(self).__modmex_base_model_type__,
+                    )
+                )
+            else:
+                dump_plan = _dump_plan_for(
+                    type(self),
+                    profile,
+                    type(self).__modmex_base_model_type__,
+                    type(self).__modmex_serialization_name_map__,
+                )
             if dump_plan is not None:
                 return dump_plan(self)
         return self._serialize(
@@ -315,21 +369,24 @@ class BaseModel(metaclass=BaseModelMeta):
         include_excluded: bool = False,
         type_serializers: TypeSerializers = None,
     ) -> str:
-        if (
-            exclude is None
-            and not include_excluded
-            and not type_serializers
-            and not type(self).__modmex_has_serialization_aliases__
-        ):
-            dump_plan = (
-                type(self).__modmex_dump_plan__
-                if profile is None
-                else _dump_plan_for(
+        if exclude is None and not include_excluded and not type_serializers:
+            if not type(self).__modmex_has_serialization_aliases__:
+                dump_plan = (
+                    type(self).__modmex_dump_plan__
+                    if profile is None
+                    else _dump_plan_for(
+                        type(self),
+                        profile,
+                        type(self).__modmex_base_model_type__,
+                    )
+                )
+            else:
+                dump_plan = _dump_plan_for(
                     type(self),
                     profile,
                     type(self).__modmex_base_model_type__,
+                    type(self).__modmex_serialization_name_map__,
                 )
-            )
             if dump_plan is not None:
                 return orjson.dumps(dump_plan(self)).decode("utf-8")
         return orjson.dumps(

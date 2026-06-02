@@ -21,6 +21,12 @@ _LT = "__modmex_lt__"
 _LE = "__modmex_le__"
 _MIN_LENGTH = "__modmex_min_length__"
 _MAX_LENGTH = "__modmex_max_length__"
+_PATTERN = "__modmex_pattern__"
+_MULTIPLE_OF = "__modmex_multiple_of__"
+_MAX_DIGITS = "__modmex_max_digits__"
+_DECIMAL_PLACES = "__modmex_decimal_places__"
+_DEPRECATED = "__modmex_deprecated__"
+_FROZEN = "__modmex_frozen__"
 
 
 def Field(
@@ -39,6 +45,12 @@ def Field(
     le: float | int | None = None,
     min_length: int | None = None,
     max_length: int | None = None,
+    pattern: str | None = None,
+    multiple_of: float | int | None = None,
+    max_digits: int | None = None,
+    decimal_places: int | None = None,
+    deprecated: str | bool | None = None,
+    frozen: bool = False,
     exclude: bool = False,
     exclude_from: Iterable[str] | None = None,
     metadata: Mapping[str, Any] | None = None,
@@ -60,6 +72,12 @@ def Field(
     field_metadata[_LE] = le
     field_metadata[_MIN_LENGTH] = min_length
     field_metadata[_MAX_LENGTH] = max_length
+    field_metadata[_PATTERN] = pattern
+    field_metadata[_MULTIPLE_OF] = multiple_of
+    field_metadata[_MAX_DIGITS] = max_digits
+    field_metadata[_DECIMAL_PLACES] = decimal_places
+    field_metadata[_DEPRECATED] = deprecated
+    field_metadata[_FROZEN] = frozen
 
     if min_length is not None and min_length < 0:
         raise ValueError("min_length must be greater than or equal to 0")
@@ -71,6 +89,14 @@ def Field(
         raise ValueError("cannot set both gt and ge")
     if lt is not None and le is not None:
         raise ValueError("cannot set both lt and le")
+    if multiple_of == 0:
+        raise ValueError("multiple_of must be non-zero")
+    if max_digits is not None and max_digits <= 0:
+        raise ValueError("max_digits must be greater than 0")
+    if decimal_places is not None and decimal_places < 0:
+        raise ValueError("decimal_places must be greater than or equal to 0")
+    if max_digits is not None and decimal_places is not None and decimal_places > max_digits:
+        raise ValueError("decimal_places cannot be greater than max_digits")
 
     if default is not MISSING and default_factory is not MISSING:
         raise ValueError("cannot specify both default and default_factory")
@@ -134,4 +160,16 @@ def field_constraints(field: DataclassField[Any]) -> dict[str, Any]:
         "le": metadata.get(_LE),
         "min_length": metadata.get(_MIN_LENGTH),
         "max_length": metadata.get(_MAX_LENGTH),
+        "pattern": metadata.get(_PATTERN),
+        "multiple_of": metadata.get(_MULTIPLE_OF),
+        "max_digits": metadata.get(_MAX_DIGITS),
+        "decimal_places": metadata.get(_DECIMAL_PLACES),
     }
+
+
+def field_deprecated(field: DataclassField[Any]) -> str | bool | None:
+    return field.metadata.get(_DEPRECATED)
+
+
+def field_frozen(field: DataclassField[Any]) -> bool:
+    return bool(field.metadata.get(_FROZEN, False))

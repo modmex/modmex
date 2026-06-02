@@ -4,6 +4,7 @@ from dataclasses import field, fields
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
+import warnings
 from typing import Literal, Optional
 
 import pytest
@@ -390,3 +391,62 @@ def test_field_stores_openapi_metadata() -> None:
     assert name_field.metadata["__modmex_title__"] == "User name"
     assert name_field.metadata["__modmex_description__"] == "Display name for the user"
     assert name_field.metadata["__modmex_examples__"] == ("Ana",)
+
+
+def test_phase_two_constraints_are_enforced() -> None:
+    class AdvancedModel(BaseModel):
+        code: str = Field(pattern=r"^[A-Z]{2}-\d{3}$")
+        qty: int = Field(multiple_of=5)
+        price: Decimal = Field(max_digits=6, decimal_places=2)
+
+    model = AdvancedModel(code="AB-123", qty=10, price="1234.56")
+
+    assert model.code == "AB-123"
+    assert model.qty == 10
+    assert model.price == Decimal("1234.56")
+
+    with pytest.raises(ValidationError) as pattern_error:
+        AdvancedModel(code="abc", qty=10, price="1234.56")
+    assert any(error["loc"] == ["code"] for error in pattern_error.value.errors)
+
+    with pytest.raises(ValidationError) as multiple_error:
+        AdvancedModel(code="AB-123", qty=11, price="1234.56")
+    assert any(error["loc"] == ["qty"] for error in multiple_error.value.errors)
+
+    with pytest.raises(ValidationError) as decimal_error:
+        AdvancedModel(code="AB-123", qty=10, price="12345.678")
+    assert any(error["loc"] == ["price"] for error in decimal_error.value.errors)
+
+
+def test_frozen_field_cannot_be_modified_after_init() -> None:
+    class FrozenModel(BaseModel):
+        id: int = Field(frozen=True)
+        name: str
+
+    model = FrozenModel(id=1, name="Ana")
+
+    with pytest.raises(AttributeError, match="frozen"):
+        model.id = 2
+
+    model.name = "Ana Maria"
+    assert model.name == "Ana Maria"
+
+
+def test_deprecated_field_emits_warning_once_per_instance() -> None:
+    class DeprecatedModel(BaseModel):
+        old_name: str = Field(deprecated="old_name is deprecated")
+
+    model = DeprecatedModel(old_name="Ana")
+    
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always", DeprecationWarning)
+        _ = model.old_name
+        _ = model.old_name
+
+    deprecation_messages = [
+        warning
+        for warning in captured
+        if isinstance(warning.message, DeprecationWarning)
+        or warning.category is DeprecationWarning
+    ]
+    assert len(deprecation_messages) == 1

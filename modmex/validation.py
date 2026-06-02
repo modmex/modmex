@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import re
 import sys
 import types
 import typing
 from collections.abc import Callable as CallableABC
 from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal, DecimalException
+from decimal import Decimal, DecimalException, InvalidOperation
 from enum import Enum
 from typing import Any, Callable, Literal, get_args, get_origin
 
@@ -549,8 +550,28 @@ def _compile_constraints(field: dataclasses.Field[Any]) -> ConstraintValidators:
     le = constraints.get("le")
     min_length = constraints.get("min_length")
     max_length = constraints.get("max_length")
+    pattern = constraints.get("pattern")
+    multiple_of = constraints.get("multiple_of")
+    max_digits = constraints.get("max_digits")
+    decimal_places = constraints.get("decimal_places")
 
-    if all(constraint is None for constraint in (gt, ge, lt, le, min_length, max_length)):
+    regex = re.compile(pattern) if pattern is not None else None
+
+    if all(
+        constraint is None
+        for constraint in (
+            gt,
+            ge,
+            lt,
+            le,
+            min_length,
+            max_length,
+            pattern,
+            multiple_of,
+            max_digits,
+            decimal_places,
+        )
+    ):
         return ()
 
     def validate_constraints(value: Any, loc: Loc) -> None:
@@ -573,6 +594,48 @@ def _compile_constraints(field: dataclasses.Field[Any]) -> ConstraintValidators:
                 raise _error(loc, f"length must be >= {min_length}", "value_error.any_str.min_length")
             if max_length is not None and current_length > max_length:
                 raise _error(loc, f"length must be <= {max_length}", "value_error.any_str.max_length")
+
+        if regex is not None:
+            if not isinstance(value, str):
+                raise _error(loc, "value must be a string for pattern validation", "type_error.pattern")
+            if regex.search(value) is None:
+                raise _error(loc, f"must match pattern '{pattern}'", "value_error.str.pattern")
+
+        if multiple_of is not None:
+            try:
+                value_decimal = Decimal(str(value))
+                multiple_decimal = Decimal(str(multiple_of))
+                if value_decimal % multiple_decimal != 0:
+                    raise _error(loc, f"must be a multiple of {multiple_of}", "value_error.number.not_multiple_of")
+            except (InvalidOperation, ValueError) as exc:
+                if isinstance(exc, ValidationError):
+                    raise
+                raise _error(loc, "value must be numeric for multiple_of", "type_error.number") from exc
+
+        if max_digits is not None or decimal_places is not None:
+            try:
+                decimal_value = Decimal(str(value))
+            except (InvalidOperation, ValueError) as exc:
+                raise _error(loc, "value must be numeric for decimal constraints", "type_error.decimal") from exc
+
+            if decimal_value.is_zero():
+                digits_count = 1
+                decimals_count = 0
+            else:
+                sign, digits, exponent = decimal_value.as_tuple()
+                digits_count = len(digits)
+                decimals_count = -exponent if exponent < 0 else 0
+                if exponent > 0:
+                    digits_count += exponent
+
+            if max_digits is not None and digits_count > max_digits:
+                raise _error(loc, f"must have at most {max_digits} digits", "value_error.decimal.max_digits")
+            if decimal_places is not None and decimals_count > decimal_places:
+                raise _error(
+                    loc,
+                    f"must have at most {decimal_places} decimal places",
+                    "value_error.decimal.max_places",
+                )
 
     return (validate_constraints,)
 
