@@ -8,7 +8,13 @@ from typing import Any, Callable
 
 import orjson
 
-from .fields import should_exclude_field
+from .fields import (
+    field_alias,
+    field_constraints,
+    field_serialization_alias,
+    field_validation_aliases,
+    should_exclude_field,
+)
 from . import rust_backend
 from .model_plans import (
     _dump_plan_for,
@@ -16,7 +22,7 @@ from .model_plans import (
     _rust_schema_for,
 )
 from .serialization import ExcludeSpec, TypeSerializers, custom_serializer, normalize_exclude, serialize_value
-from .validation import validate_model_fields
+from .validation import validate_model_constraints, validate_model_fields
 
 
 def field_validator(field_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -59,6 +65,36 @@ class BaseModelMeta(type):
         model_cls.__modmex_base_model_type__ = base_model_type
         model_cls.__modmex_fields__ = model_fields
         model_cls.__modmex_field_names__ = {field.name for field in model_fields}
+        validation_alias_map: dict[str, str] = {}
+        serialization_name_map: dict[str, str] = {}
+        has_constraints = False
+        for field in model_fields:
+            alias = field_alias(field)
+            validation_aliases = field_validation_aliases(field)
+            constraints = field_constraints(field)
+            if any(value is not None for value in constraints.values()):
+                has_constraints = True
+            input_aliases = validation_aliases or ((alias,) if alias else ())
+            for alias_name in input_aliases:
+                if alias_name == field.name:
+                    continue
+                existing_field = validation_alias_map.get(alias_name)
+                if existing_field is not None and existing_field != field.name:
+                    raise ValueError(
+                        f"duplicate validation alias '{alias_name}' for fields "
+                        f"'{existing_field}' and '{field.name}'"
+                    )
+                validation_alias_map[alias_name] = field.name
+            output_name = field_serialization_alias(field) or alias or field.name
+            serialization_name_map[field.name] = output_name
+        model_cls.__modmex_validation_alias_map__ = validation_alias_map
+        model_cls.__modmex_has_validation_aliases__ = bool(validation_alias_map)
+        model_cls.__modmex_serialization_name_map__ = serialization_name_map
+        model_cls.__modmex_has_serialization_aliases__ = any(
+            output_name != field_name
+            for field_name, output_name in serialization_name_map.items()
+        )
+        model_cls.__modmex_has_constraints__ = has_constraints
         model_cls.__modmex_dump_field_cache__ = {}
         model_cls.__modmex_dump_plan_cache__ = {}
         model_cls.__modmex_properties__ = tuple(
@@ -107,12 +143,28 @@ class BaseModelMeta(type):
         original_init = model_cls.__init__
         model_core = model_cls.__modmex_core__
         field_names = model_cls.__modmex_field_names__
+        validation_alias_map = model_cls.__modmex_validation_alias_map__
+        has_validation_aliases = model_cls.__modmex_has_validation_aliases__
+        has_constraints = model_cls.__modmex_has_constraints__
 
         def new_init(self: Any, *args: Any, **kwargs: Any) -> None:
-            if not args and rust_backend.try_core_construct_into(model_core, self, kwargs):
+            normalized_kwargs = kwargs
+            if has_validation_aliases and kwargs:
+                for alias_name, field_name in validation_alias_map.items():
+                    if alias_name not in normalized_kwargs:
+                        continue
+                    if normalized_kwargs is kwargs:
+                        normalized_kwargs = dict(kwargs)
+                    if field_name not in normalized_kwargs:
+                        normalized_kwargs[field_name] = normalized_kwargs[alias_name]
+                    del normalized_kwargs[alias_name]
+
+            if not args and rust_backend.try_core_construct_into(model_core, self, normalized_kwargs):
+                if has_constraints:
+                    validate_model_constraints(self)
                 return
-            filtered_kwargs = kwargs if kwargs.keys() <= field_names else {
-                key: value for key, value in kwargs.items() if key in field_names
+            filtered_kwargs = normalized_kwargs if normalized_kwargs.keys() <= field_names else {
+                key: value for key, value in normalized_kwargs.items() if key in field_names
             }
             original_init(self, *args, **filtered_kwargs)
 
@@ -174,11 +226,14 @@ class BaseModel(metaclass=BaseModelMeta):
         include_excluded: bool = False,
         type_serializers: TypeSerializers = None,
     ) -> dict[str, Any]:
-        if exclude is None and profile is None and not include_excluded and not type_serializers:
+        has_serialization_aliases = type(self).__modmex_has_serialization_aliases__
+        serialization_name_map = type(self).__modmex_serialization_name_map__
+
+        if exclude is None and profile is None and not include_excluded and not type_serializers and not has_serialization_aliases:
             dump_plan = type(self).__modmex_dump_plan__
             if dump_plan is not None:
                 return dump_plan(self)
-        if exclude is None and profile is not None and not include_excluded and not type_serializers:
+        if exclude is None and profile is not None and not include_excluded and not type_serializers and not has_serialization_aliases:
             dump_plan = _dump_plan_for(
                 type(self),
                 profile,
@@ -188,20 +243,21 @@ class BaseModel(metaclass=BaseModelMeta):
                 return dump_plan(self)
         exclude_map = normalize_exclude(exclude)
         if exclude_map:
-            result = {
-                field.name: serialize_value(
-                    getattr(self, field.name),
-                    exclude=exclude_map.get(field.name),
+            result: dict[str, Any] = {}
+            for field in type(self).__modmex_fields__:
+                field_name = field.name
+                if should_exclude_field(field, exclude_map.get(field_name), profile, include_excluded):
+                    continue
+                result[serialization_name_map.get(field_name, field_name)] = serialize_value(
+                    getattr(self, field_name),
+                    exclude=exclude_map.get(field_name),
                     profile=profile,
                     include_excluded=include_excluded,
                     type_serializers=type_serializers,
                 )
-                for field in type(self).__modmex_fields__
-                if not should_exclude_field(field, exclude_map.get(field.name), profile, include_excluded)
-            }
         else:
             result = {
-                field.name: serialize_value(
+                serialization_name_map.get(field.name, field.name): serialize_value(
                     getattr(self, field.name),
                     exclude=None,
                     profile=profile,
@@ -220,11 +276,23 @@ class BaseModel(metaclass=BaseModelMeta):
         include_excluded: bool = False,
         type_serializers: TypeSerializers = None,
     ) -> dict[str, Any]:
-        if exclude is None and profile is None and not include_excluded and not type_serializers:
+        if (
+            exclude is None
+            and profile is None
+            and not include_excluded
+            and not type_serializers
+            and not type(self).__modmex_has_serialization_aliases__
+        ):
             dump_plan = type(self).__modmex_dump_plan__
             if dump_plan is not None:
                 return dump_plan(self)
-        if exclude is None and profile is not None and not include_excluded and not type_serializers:
+        if (
+            exclude is None
+            and profile is not None
+            and not include_excluded
+            and not type_serializers
+            and not type(self).__modmex_has_serialization_aliases__
+        ):
             dump_plan = _dump_plan_for(
                 type(self),
                 profile,
@@ -247,7 +315,12 @@ class BaseModel(metaclass=BaseModelMeta):
         include_excluded: bool = False,
         type_serializers: TypeSerializers = None,
     ) -> str:
-        if exclude is None and not include_excluded and not type_serializers:
+        if (
+            exclude is None
+            and not include_excluded
+            and not type_serializers
+            and not type(self).__modmex_has_serialization_aliases__
+        ):
             dump_plan = (
                 type(self).__modmex_dump_plan__
                 if profile is None

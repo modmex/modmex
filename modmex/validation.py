@@ -16,10 +16,12 @@ from typing import Any, Callable, Literal, get_args, get_origin
 
 from .datetime_parser import parse_date, parse_datetime, parse_duration, parse_time
 from .errors import ValidationError
+from .fields import field_constraints
 
 GlobalNS_T = dict[str, Any]
 Loc = list[str | int]
 ValueValidator = Callable[[Any, Loc], Any]
+ConstraintValidator = Callable[[Any, Loc], None]
 
 NoneType = type(None)
 _NONE_TYPES: tuple[Any, ...] = (None, NoneType, Literal[None])
@@ -519,16 +521,87 @@ def _validate_types(expected_type: Any, value: Any, strict: bool, globalns: Glob
 
 
 @functools.lru_cache(maxsize=None)
-def _validation_schema(model_cls: type[Any], strict: bool = False) -> tuple[tuple[str, ValueValidator], ...]:
+def _validation_schema(
+    model_cls: type[Any],
+    strict: bool = False,
+) -> tuple[tuple[str, ValueValidator, tuple[ConstraintValidator, ...]], ...]:
     globalns = sys.modules[model_cls.__module__].__dict__
     try:
         type_hints = typing.get_type_hints(model_cls, globalns=globalns, include_extras=True)
     except Exception:
         type_hints = {}
     return tuple(
-        (field.name, _compile_validator(type_hints.get(field.name, field.type), strict, globalns))
+        (
+            field.name,
+            _compile_validator(type_hints.get(field.name, field.type), strict, globalns),
+            _compile_constraints(field),
+        )
         for field in dataclasses.fields(model_cls)
     )
+
+
+def _compile_constraints(field: dataclasses.Field[Any]) -> tuple[ConstraintValidator, ...]:
+    constraints = field_constraints(field)
+    validators: list[ConstraintValidator] = []
+
+    gt = constraints.get("gt")
+    ge = constraints.get("ge")
+    lt = constraints.get("lt")
+    le = constraints.get("le")
+    min_length = constraints.get("min_length")
+    max_length = constraints.get("max_length")
+
+    if gt is not None:
+        def validate_gt(value: Any, loc: Loc, threshold: Any = gt) -> None:
+            if not value > threshold:
+                raise _error(loc, f"must be > {threshold}", "value_error.number.not_gt")
+
+        validators.append(validate_gt)
+
+    if ge is not None:
+        def validate_ge(value: Any, loc: Loc, threshold: Any = ge) -> None:
+            if not value >= threshold:
+                raise _error(loc, f"must be >= {threshold}", "value_error.number.not_ge")
+
+        validators.append(validate_ge)
+
+    if lt is not None:
+        def validate_lt(value: Any, loc: Loc, threshold: Any = lt) -> None:
+            if not value < threshold:
+                raise _error(loc, f"must be < {threshold}", "value_error.number.not_lt")
+
+        validators.append(validate_lt)
+
+    if le is not None:
+        def validate_le(value: Any, loc: Loc, threshold: Any = le) -> None:
+            if not value <= threshold:
+                raise _error(loc, f"must be <= {threshold}", "value_error.number.not_le")
+
+        validators.append(validate_le)
+
+    if min_length is not None:
+        def validate_min_length(value: Any, loc: Loc, minimum: int = min_length) -> None:
+            try:
+                current_length = len(value)
+            except TypeError as exc:
+                raise _error(loc, "value has no length", "type_error.length") from exc
+            if current_length < minimum:
+                raise _error(loc, f"length must be >= {minimum}", "value_error.any_str.min_length")
+
+        validators.append(validate_min_length)
+
+    if max_length is not None:
+        def validate_max_length(value: Any, loc: Loc, maximum: int = max_length) -> None:
+            try:
+                current_length = len(value)
+            except TypeError as exc:
+                raise _error(loc, "value has no length", "type_error.length") from exc
+            if current_length > maximum:
+                raise _error(loc, f"length must be <= {maximum}", "value_error.any_str.max_length")
+
+        validators.append(validate_max_length)
+
+    return tuple(validators)
 
 
 def validate_model_fields(target: Any, strict: bool = False) -> None:
@@ -536,11 +609,42 @@ def validate_model_fields(target: Any, strict: bool = False) -> None:
     validators = _validation_schema(type(target), strict)
     errors: list[dict[str, Any]] = []
 
-    for field_name, validator in validators:
+    for field_name, validator, constraints in validators:
         value = getattr(target, field_name)
         try:
             validated = validator(value, [field_name])
+            for constraint_validator in constraints:
+                constraint_validator(validated, [field_name])
             setattr(target, field_name, validated)
+        except ValidationError as exc:
+            errors.extend(exc.errors)
+        except Exception as exc:
+            errors.append({"loc": [field_name], "msg": str(exc), "type": "unexpected_error"})
+
+    if errors:
+        raise ValidationError(errors=errors)
+
+
+@functools.lru_cache(maxsize=None)
+def _constraint_schema(model_cls: type[Any]) -> tuple[tuple[str, tuple[ConstraintValidator, ...]], ...]:
+    return tuple(
+        (field.name, _compile_constraints(field))
+        for field in dataclasses.fields(model_cls)
+    )
+
+
+def validate_model_constraints(target: Any) -> None:
+    """Validate only declared field constraints on ``target`` in place."""
+    constraints_schema = _constraint_schema(type(target))
+    errors: list[dict[str, Any]] = []
+
+    for field_name, constraints in constraints_schema:
+        if not constraints:
+            continue
+        value = getattr(target, field_name)
+        try:
+            for constraint_validator in constraints:
+                constraint_validator(value, [field_name])
         except ValidationError as exc:
             errors.extend(exc.errors)
         except Exception as exc:

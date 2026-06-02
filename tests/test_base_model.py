@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import field
+from dataclasses import field, fields
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -317,3 +317,76 @@ def test_model_validator_can_return_none_without_modifying_state() -> None:
 
     assert item.name == "tea"
     assert item.calls == 1
+
+
+def test_alias_is_applied_for_input_and_output() -> None:
+    class AliasedUser(BaseModel):
+        first_name: str = Field(alias="firstName")
+
+    user = AliasedUser(firstName="Ana")
+
+    assert user.first_name == "Ana"
+    assert user.model_dump() == {"firstName": "Ana"}
+
+
+def test_validation_alias_is_only_for_input() -> None:
+    class InboundUser(BaseModel):
+        first_name: str = Field(validation_alias="firstName")
+
+    user = InboundUser(firstName="Ana")
+
+    assert user.first_name == "Ana"
+    assert user.model_dump() == {"first_name": "Ana"}
+
+
+def test_serialization_alias_is_only_for_output() -> None:
+    class OutboundUser(BaseModel):
+        first_name: str = Field(serialization_alias="firstName")
+
+    user = OutboundUser(first_name="Ana")
+
+    assert user.first_name == "Ana"
+    assert user.model_dump() == {"firstName": "Ana"}
+
+
+def test_field_name_wins_when_alias_and_field_are_both_provided() -> None:
+    class ConflictUser(BaseModel):
+        first_name: str = Field(alias="firstName")
+
+    user = ConflictUser(first_name="Internal", firstName="External")
+
+    assert user.first_name == "Internal"
+
+
+def test_validation_constraints_are_enforced() -> None:
+    class ConstrainedModel(BaseModel):
+        qty: int = Field(gt=0, le=5)
+        name: str = Field(min_length=2, max_length=5)
+
+    model = ConstrainedModel(qty=3, name="Ana")
+
+    assert model.qty == 3
+    assert model.name == "Ana"
+
+    with pytest.raises(ValidationError) as gt_error:
+        ConstrainedModel(qty=0, name="Ana")
+    assert any(error["loc"] == ["qty"] for error in gt_error.value.errors)
+
+    with pytest.raises(ValidationError) as len_error:
+        ConstrainedModel(qty=2, name="A")
+    assert any(error["loc"] == ["name"] for error in len_error.value.errors)
+
+
+def test_field_stores_openapi_metadata() -> None:
+    class DocumentedModel(BaseModel):
+        name: str = Field(
+            title="User name",
+            description="Display name for the user",
+            examples=["Ana"],
+        )
+
+    name_field = next(model_field for model_field in fields(DocumentedModel) if model_field.name == "name")
+
+    assert name_field.metadata["__modmex_title__"] == "User name"
+    assert name_field.metadata["__modmex_description__"] == "Display name for the user"
+    assert name_field.metadata["__modmex_examples__"] == ("Ana",)
