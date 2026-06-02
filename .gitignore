@@ -220,3 +220,5 @@ modmex-core/target/
 # Streamlit
 .streamlit/secrets.toml
 .vscode
+junit.xml
+

@@ -1,6 +1,6 @@
 [project]
 name = "modmex"
-version = "1.1.4"
+version = "1.1.5"
 description = "Lightweight Python models built on dataclasses with validation, serialization, and type-safe data mapping"
 authors = [
     {name = "clandro89@gmail.com"}
@@ -32,6 +32,7 @@ include = [
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.3"
 coverage = "^7.14.1"
+pytest-cov = "^7.1.0"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

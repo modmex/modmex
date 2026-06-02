@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import MISSING, dataclass, fields
 from typing import Any, Callable
 import warnings
@@ -26,6 +27,30 @@ from .model_plans import (
 )
 from .serialization import ExcludeSpec, TypeSerializers, custom_serializer, normalize_exclude, serialize_value
 from .validation import validate_model_constraints, validate_model_fields
+
+
+_INTERNAL_ACCESS_FLAG = "__modmex_internal_access__"
+
+
+def _internal_state(target: Any) -> dict[str, Any]:
+    return object.__getattribute__(target, "__dict__")
+
+
+def _set_internal_access(target: Any, enabled: bool) -> None:
+    object.__setattr__(target, _INTERNAL_ACCESS_FLAG, enabled)
+
+
+def _has_internal_access(target: Any) -> bool:
+    return _internal_state(target).get(_INTERNAL_ACCESS_FLAG, False)
+
+
+@contextmanager
+def _bypass_internal_field_hooks(target: Any):
+    _set_internal_access(target, True)
+    try:
+        yield
+    finally:
+        _set_internal_access(target, False)
 
 
 def field_validator(field_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -107,6 +132,7 @@ class BaseModelMeta(type):
         )
         model_cls.__modmex_deprecated_fields__ = deprecated_fields
         model_cls.__modmex_frozen_fields__ = frozenset(frozen_fields)
+        model_cls.__modmex_has_internal_field_hooks__ = bool(deprecated_fields or frozen_fields)
         model_cls.__modmex_has_constraints__ = has_constraints
         model_cls.__modmex_dump_field_cache__ = {}
         model_cls.__modmex_dump_plan_cache__ = {}
@@ -161,6 +187,7 @@ class BaseModelMeta(type):
         has_validation_aliases = model_cls.__modmex_has_validation_aliases__
         has_constraints = model_cls.__modmex_has_constraints__
         model_frozen_fields = model_cls.__modmex_frozen_fields__
+        has_internal_field_hooks = model_cls.__modmex_has_internal_field_hooks__
 
         def new_init(self: Any, *args: Any, **kwargs: Any) -> None:
             normalized_kwargs = kwargs
@@ -173,6 +200,20 @@ class BaseModelMeta(type):
                     if field_name not in normalized_kwargs:
                         normalized_kwargs[field_name] = normalized_kwargs[alias_name]
                     del normalized_kwargs[alias_name]
+
+            # Temporarily bypass deprecated/frozen hooks during internal model
+            # construction so validation and coercion do not trigger user-facing behavior.
+            if has_internal_field_hooks:
+                with _bypass_internal_field_hooks(self):
+                    if not args and rust_backend.try_core_construct_into(model_core, self, normalized_kwargs):
+                        if has_constraints:
+                            validate_model_constraints(self)
+                        return
+                    filtered_kwargs = normalized_kwargs if normalized_kwargs.keys() <= field_names else {
+                        key: value for key, value in normalized_kwargs.items() if key in field_names
+                    }
+                    original_init(self, *args, **filtered_kwargs)
+                return
 
             if not args and rust_backend.try_core_construct_into(model_core, self, normalized_kwargs):
                 if has_constraints:
@@ -187,7 +228,7 @@ class BaseModelMeta(type):
             original_setattr = model_cls.__setattr__
 
             def new_setattr(self: Any, name: str, value: Any) -> None:
-                if name in model_frozen_fields and name in self.__dict__:
+                if name in model_frozen_fields and name in self.__dict__ and not _has_internal_access(self):
                     raise AttributeError(f"Field '{name}' is frozen and cannot be modified")
                 original_setattr(self, name, value)
 
@@ -199,8 +240,8 @@ class BaseModelMeta(type):
             def new_getattribute(self: Any, name: str) -> Any:
                 value = original_getattribute(self, name)
                 deprecated = deprecated_fields.get(name)
-                if deprecated:
-                    state = original_getattribute(self, "__dict__")
+                if deprecated and not _has_internal_access(self):
+                    state = _internal_state(self)
                     warned = state.get("__modmex_deprecation_warned__")
                     if warned is None:
                         warned = set()
@@ -224,11 +265,21 @@ class BaseModelMeta(type):
 class BaseModel(metaclass=BaseModelMeta):
     """Base class for lightweight validated models."""
 
-    def __post_init__(self) -> None:
+    def _run_validation_lifecycle(self) -> None:
         self._validate_model_before()
         self._validate_types()
         self._validate_fields()
         self._validate_model_after()
+
+    def __post_init__(self) -> None:
+        # Temporarily bypass deprecated/frozen hooks during internal validation
+        # passes so framework reads/writes do not emit warnings or block updates.
+        if type(self).__modmex_has_internal_field_hooks__:
+            with _bypass_internal_field_hooks(self):
+                self._run_validation_lifecycle()
+            return
+
+        self._run_validation_lifecycle()
 
     def _validate_types(self) -> None:
         validate_model_fields(self)
