@@ -201,6 +201,32 @@ def test_validate_model_fields_fallback_and_unexpected_error(monkeypatch: pytest
     assert exc_info.value.errors[0]["type"] == "unexpected_error"
 
 
+def test_validate_simple_type_covers_direct_branches() -> None:
+    class Status(Enum):
+        ACTIVE = "active"
+
+    @validation_module.dataclasses.dataclass
+    class Pair:
+        left: int
+        right: int
+
+    class Box:
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+    token = object()
+    assert validation_module._validate_simple_type(Any, token, ["any"]) is token
+
+    active = Status.ACTIVE
+    assert validation_module._validate_simple_type(Status, active, ["enum"]) is active
+
+    box = Box("kept")
+    assert validation_module._validate_simple_type(Box, box, ["box"]) is box
+
+    with pytest.raises(ValidationError, match="missing 1 required positional argument"):
+        validation_module._validate_simple_type(Pair, {"left": 1}, ["pair"])
+
+
 def test_compile_validator_and_compile_simple_type_branch_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
     globalns = globals().copy()
 

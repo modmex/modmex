@@ -359,6 +359,54 @@ def test_field_name_wins_when_alias_and_field_are_both_provided() -> None:
     assert user.first_name == "Internal"
 
 
+def test_extra_constructor_fields_are_ignored_for_models_with_internal_hooks() -> None:
+    class HookedModel(BaseModel):
+        id: int = Field(frozen=True)
+        old_name: str = Field(deprecated=True)
+
+    model = HookedModel(id=1, old_name="Ana", ignored=True)
+
+    assert model.id == 1
+    assert model.old_name == "Ana"
+    assert not hasattr(model, "ignored")
+
+
+def test_internal_hook_bypass_path_runs_validation_when_fast_init_is_disabled() -> None:
+    class HookedValidatedModel(BaseModel):
+        id: int = Field(frozen=True)
+        old_name: str = Field(deprecated=True)
+        name: str
+
+        @field_validator("name")
+        def normalize_name(self, value: str) -> str:
+            return value.upper()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        model = HookedValidatedModel(id=1, old_name="Ana", name="ana", ignored=True)
+
+    assert model.name == "ANA"
+    assert not hasattr(model, "ignored")
+
+
+def test_internal_hooks_still_run_constraints_after_rust_fast_init() -> None:
+    class HookedConstrainedModel(BaseModel):
+        id: int = Field(frozen=True)
+        old_name: str = Field(deprecated=True)
+        qty: int = Field(gt=0)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        model = HookedConstrainedModel(id=1, old_name="Ana", qty=2)
+
+    assert model.qty == 2
+
+    with pytest.raises(ValidationError) as exc_info:
+        HookedConstrainedModel(id=1, old_name="Ana", qty=0)
+
+    assert any(error["loc"] == ["qty"] for error in exc_info.value.errors)
+
+
 def test_validation_constraints_are_enforced() -> None:
     class ConstrainedModel(BaseModel):
         qty: int = Field(gt=0, le=5)
@@ -450,3 +498,17 @@ def test_deprecated_field_emits_warning_once_per_instance() -> None:
         or warning.category is DeprecationWarning
     ]
     assert len(deprecation_messages) == 1
+
+
+def test_non_deprecated_fields_do_not_emit_warnings_when_wrapper_is_installed() -> None:
+    class MixedModel(BaseModel):
+        old_name: str = Field(deprecated=True)
+        name: str
+
+    model = MixedModel(old_name="Ana", name="Active")
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always", DeprecationWarning)
+        assert model.name == "Active"
+
+    assert captured == []
