@@ -175,6 +175,53 @@ json_payload = account.model_dump_json(profile="public")
 ```
 
 
+## Dynamic Models
+
+Use `create_model` when you need to define a model at runtime.
+
+Field definitions can use one of these forms:
+
+- `(annotation, default)`
+- `(annotation, Field(...))`
+- `typing.Annotated[annotation, Field(...)]`
+
+```python
+from typing import Annotated
+
+from modmex import BaseModel, Field, create_model, field_validator, model_validator
+
+
+def normalize_name(self, value: str) -> str:
+    return value.strip().title()
+
+
+DynamicUser = create_model(
+    "DynamicUser",
+    id=(int, ...),
+    name=(str, Field(default="anonymous")),
+    slug=Annotated[str, Field(default="user", exclude=True)],
+    __validators__={"normalize_name": field_validator("name")(normalize_name)},
+)
+
+
+class StaticUser(BaseModel):
+    id: int
+    name: str = "anonymous"
+    slug: str = Field(default="user", exclude=True)
+
+    @field_validator("name")
+    def normalize_name(self, value: str) -> str:
+        return value.strip().title()
+
+
+dynamic_user = DynamicUser(id="1", name="  john ")
+static_user = StaticUser(id="1", name="  john ")
+
+assert dynamic_user.model_dump() == static_user.model_dump()
+assert dynamic_user.name == static_user.name == "Jhon"
+```
+
+
 ## Validators
 
 ### Field validators

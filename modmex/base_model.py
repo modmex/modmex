@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import MISSING, dataclass, fields
-from typing import Any, Callable
+from dataclasses import MISSING, Field as DataclassField, dataclass, fields
+import sys
+from typing import Any, Callable, get_args, get_origin
 import warnings
 
 import orjson
@@ -462,3 +463,65 @@ def _dump_fields_for(model_cls: type[Any], profile: str | None, include_excluded
             if not should_exclude_field(field, None, profile, include_excluded)
         )
     return cache[key]
+
+
+def _create_model_field_spec(field_name: str, field_definition: Any) -> tuple[Any, Any]:
+    if isinstance(field_definition, tuple):
+        if len(field_definition) != 2:
+            raise TypeError(
+                f"field '{field_name}' must be defined as (annotation, default) or (annotation, Field(...))"
+            )
+        annotation, default_spec = field_definition
+        if default_spec is Ellipsis:
+            return annotation, MISSING
+        return annotation, default_spec
+
+    origin = get_origin(field_definition)
+    if origin is not None and getattr(origin, "__qualname__", "") == "Annotated":
+        annotated_args = get_args(field_definition)
+        if not annotated_args:
+            raise TypeError(f"field '{field_name}' annotated type is invalid")
+        annotation = annotated_args[0]
+        default_spec: Any = MISSING
+        for metadata_item in annotated_args[1:]:
+            if isinstance(metadata_item, DataclassField):
+                default_spec = metadata_item
+                break
+        return annotation, default_spec
+
+    raise TypeError(
+        f"field '{field_name}' must be defined as (annotation, default), (annotation, Field(...)) or Annotated[annotation, Field(...)]"
+    )
+
+
+def create_model(
+    model_name: str,
+    __base__: type[Any] = None,
+    __module__: str | None = None,
+    __validators__: Mapping[str, Any] | None = None,
+    **field_definitions: Any,
+) -> type[Any]:
+    """Create a ``BaseModel`` subclass dynamically from field definitions."""
+
+    base_model = BaseModel if __base__ is None else __base__
+    if not isinstance(base_model, type) or not issubclass(base_model, BaseModel):
+        raise TypeError("__base__ must be a BaseModel subclass")
+
+    if __module__ is None:
+        try:
+            __module__ = sys._getframe(1).f_globals.get("__name__", "__main__")
+        except (AttributeError, ValueError):
+            __module__ = "__main__"
+
+    namespace: dict[str, Any] = {"__module__": __module__, "__annotations__": {}}
+    if __validators__:
+        namespace.update(__validators__)
+
+    annotations = namespace["__annotations__"]
+    for field_name, field_definition in field_definitions.items():
+        annotation, default_spec = _create_model_field_spec(field_name, field_definition)
+        annotations[field_name] = annotation
+        if default_spec is not MISSING:
+            namespace[field_name] = default_spec
+
+    return BaseModelMeta(model_name, (base_model,), namespace)
