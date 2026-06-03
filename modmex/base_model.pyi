@@ -31,3 +31,13 @@ class BaseModel:
         include_excluded: bool = False,
         type_serializers: TypeSerializers = None,
     ) -> str: ...
+
+
+def create_model(
+    model_name: str,
+    __base__: type[BaseModel] | None = None,
+    __module__: str | None = None,
+    __validators__: Mapping[str, Any] | None = None,
+    **field_definitions: Any,
+) -> type[BaseModel]: ...
+

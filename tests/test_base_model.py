@@ -5,16 +5,18 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 import warnings
-from typing import Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import pytest
 
 from modmex import (
     BaseModel,
     Field,
+    create_model,
     field_validator,
     model_validator,
 )
+import modmex.base_model as base_model_module
 from modmex.errors import ValidationError
 
 
@@ -318,6 +320,96 @@ def test_model_validator_can_return_none_without_modifying_state() -> None:
 
     assert item.name == "tea"
     assert item.calls == 1
+
+
+def test_create_model_matches_static_model_for_tuple_and_field_specs() -> None:
+    def normalize_foo(self, value: str) -> str:
+        return value.strip().title()
+
+    DynamicFoobarModel = create_model(
+        "DynamicFoobarModel",
+        foo=(str, ...),
+        bar=(int, 123),
+        baz=Annotated[str, Field(default="x", exclude=True)],
+        __validators__={"normalize_foo": field_validator("foo")(normalize_foo)},
+    )
+
+    class StaticFoobarModel(BaseModel):
+        foo: str
+        bar: int = 123
+        baz: str = Field(default="x", exclude=True)
+
+        @field_validator("foo")
+        def normalize_foo(self, value: str) -> str:
+            return value.strip().title()
+
+    dynamic = DynamicFoobarModel(foo="  hello ")
+    static = StaticFoobarModel(foo="  hello ")
+
+    assert dynamic.model_dump() == static.model_dump()
+    assert dynamic.__dict__ == static.__dict__
+    assert dynamic.foo == "Hello"
+    assert dynamic.bar == 123
+    assert dynamic.baz == "x"
+
+
+def test_create_model_can_use_base_and_field_validator_namespace() -> None:
+    class AuditBase(BaseModel):
+        pass
+
+    def suffix_slug(self, values: dict) -> dict:
+        values["slug"] = f"{values['slug']}-dynamic"
+        return values
+
+    Dynamic = create_model(
+        "Dynamic",
+        __base__=AuditBase,
+        name=(str, ...),
+        slug=(str, "item"),
+        __validators__={"suffix_slug": model_validator(mode="after")(suffix_slug)},
+    )
+
+    item = Dynamic(name="tea")
+
+    assert isinstance(item, AuditBase)
+    assert item.slug == "item-dynamic"
+
+
+def test_create_model_rejects_invalid_tuple_definition() -> None:
+    with pytest.raises(TypeError, match="must be defined as"):
+        create_model("InvalidTuple", foo=(str, 1, 2))
+
+
+def test_create_model_rejects_invalid_field_definition() -> None:
+    with pytest.raises(TypeError, match="must be defined as"):
+        create_model("InvalidField", foo=str)
+
+
+def test_create_model_rejects_non_basemodel_base() -> None:
+    with pytest.raises(TypeError, match="BaseModel subclass"):
+        create_model("InvalidBase", __base__=object, foo=(str, ...))
+
+
+def test_create_model_annotated_empty_args_raises_type_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeAnnotatedOrigin:
+        __qualname__ = "Annotated"
+
+    monkeypatch.setattr(base_model_module, "get_origin", lambda _: _FakeAnnotatedOrigin)
+    monkeypatch.setattr(base_model_module, "get_args", lambda _: ())
+
+    with pytest.raises(TypeError, match="annotated type is invalid"):
+        create_model("InvalidAnnotated", foo=object())
+
+
+def test_create_model_module_fallback_when_frame_lookup_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise_value_error(_: int) -> Any:
+        raise ValueError("no frame")
+
+    monkeypatch.setattr(base_model_module.sys, "_getframe", _raise_value_error)
+
+    Dynamic = create_model("FallbackModuleModel", value=(int, ...))
+
+    assert Dynamic.__module__ == "__main__"
 
 
 def test_alias_is_applied_for_input_and_output() -> None:
