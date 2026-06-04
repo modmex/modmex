@@ -80,8 +80,9 @@ def model_validator(mode: str = "before") -> Callable[[Callable[..., Any]], Call
 
 class BaseModelMeta(type):
     def __new__(mcls, name: str, bases: tuple[type, ...], namespace: dict[str, Any]) -> type:
-        for field_name in namespace.get("__annotations__", {}):
-            field_spec = namespace.get(field_name, MISSING)
+        for field_name, field_spec in tuple(namespace.items()):
+            if field_name.startswith("__"):
+                continue
             if isinstance(field_spec, FieldInfo):
                 namespace[field_name] = field_spec.to_dataclass_field()
         
