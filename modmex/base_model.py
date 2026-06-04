@@ -12,6 +12,7 @@ import warnings
 import orjson
 
 from .fields import (
+    FieldInfo,
     field_alias,
     field_constraints,
     field_deprecated,
@@ -79,6 +80,11 @@ def model_validator(mode: str = "before") -> Callable[[Callable[..., Any]], Call
 
 class BaseModelMeta(type):
     def __new__(mcls, name: str, bases: tuple[type, ...], namespace: dict[str, Any]) -> type:
+        for field_name in namespace.get("__annotations__", {}):
+            field_spec = namespace.get(field_name, MISSING)
+            if isinstance(field_spec, FieldInfo):
+                namespace[field_name] = field_spec.to_dataclass_field()
+        
         model_cls = super().__new__(mcls, name, bases, namespace)
         dataclass(model_cls, kw_only=True)
         model_fields = fields(model_cls)
@@ -484,7 +490,7 @@ def _create_model_field_spec(field_name: str, field_definition: Any) -> tuple[An
         annotation = annotated_args[0]
         default_spec: Any = MISSING
         for metadata_item in annotated_args[1:]:
-            if isinstance(metadata_item, DataclassField):
+            if isinstance(metadata_item, (DataclassField, FieldInfo)):
                 default_spec = metadata_item
                 break
         return annotation, default_spec
@@ -522,6 +528,10 @@ def create_model(
         annotation, default_spec = _create_model_field_spec(field_name, field_definition)
         annotations[field_name] = annotation
         if default_spec is not MISSING:
-            namespace[field_name] = default_spec
+            namespace[field_name] = (
+                default_spec.to_dataclass_field()
+                if isinstance(default_spec, FieldInfo)
+                else default_spec
+            )
 
     return BaseModelMeta(model_name, (base_model,), namespace)

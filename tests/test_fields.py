@@ -1,10 +1,11 @@
-from dataclasses import dataclass, fields
+from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
 
-from modmex import Field
+from modmex import BaseModel, Field
 from modmex.fields import (
+    FieldInfo,
     _VALIDATION_ALIASES,
     field_alias,
     field_constraints,
@@ -22,8 +23,7 @@ def test_field_rejects_default_and_default_factory_together() -> None:
 
 
 def test_field_without_default_or_default_factory_is_supported() -> None:
-    @dataclass
-    class Example:
+    class Example(BaseModel):
         value: str = Field()
 
     model = Example(value="ok")
@@ -32,8 +32,7 @@ def test_field_without_default_or_default_factory_is_supported() -> None:
 
 
 def test_field_uses_default_factory() -> None:
-    @dataclass
-    class Example:
+    class Example(BaseModel):
         values: list[str] = Field(default_factory=list)
 
     first = Example()
@@ -42,6 +41,47 @@ def test_field_uses_default_factory() -> None:
 
     assert first.values == ["one"]
     assert second.values == []
+
+
+def test_field_returns_field_info() -> None:
+    field_info = Field(default=1, gt=0)
+
+    assert isinstance(field_info, FieldInfo)
+    assert field_info.default == 1
+    assert field_info.gt == 0
+
+
+def test_field_info_can_be_specialized_for_parameter_metadata() -> None:
+    class Param(FieldInfo):
+        pass
+
+    class Query(Param):
+        pass
+
+    class ModelField(BaseModel):
+        field_info: Param
+        name: str
+
+    model_field = ModelField(name="limit", field_info=Query(default=10, gt=0, le=100))
+
+    assert isinstance(model_field.field_info, Query)
+    assert model_field.field_info.gt == 0
+    assert model_field.field_info.le == 100
+
+
+def test_field_info_subclass_can_configure_model_field() -> None:
+    class Query(FieldInfo):
+        pass
+
+    class Filters(BaseModel):
+        limit: int = Query(default=10, gt=0, le=100)
+
+    (field,) = fields(Filters)
+    model = Filters()
+
+    assert model.limit == 10
+    assert field_constraints(field)["gt"] == 0
+    assert field_constraints(field)["le"] == 100
 
 
 @pytest.mark.parametrize(
@@ -64,8 +104,7 @@ def test_field_rejects_invalid_constraints(kwargs: dict[str, object], message: s
 
 
 def test_should_exclude_field_respects_metadata_and_flags() -> None:
-    @dataclass
-    class Example:
+    class Example(BaseModel):
         visible: str = Field("ok")
         hidden: str = Field("x", exclude=True)
         by_profile: str = Field("y", exclude_from="public")
@@ -82,8 +121,7 @@ def test_should_exclude_field_respects_metadata_and_flags() -> None:
 
 
 def test_field_helpers_read_modmex_metadata() -> None:
-    @dataclass
-    class Example:
+    class Example(BaseModel):
         value: int = Field(
             1,
             alias="input_name",
@@ -125,8 +163,7 @@ def test_field_helpers_read_modmex_metadata() -> None:
 
 
 def test_field_validation_alias_accepts_single_string() -> None:
-    @dataclass
-    class Example:
+    class Example(BaseModel):
         value: str = Field("ok", validation_alias="legacy")
 
     (field,) = fields(Example)
