@@ -43,7 +43,7 @@ jobs:
           poetry run coverage xml -o coverage.xml
 
       - name: Upload coverage reports to Codecov
-        if: matrix.python-version == '3.12'
+        if: matrix.python-version == '3.12' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
