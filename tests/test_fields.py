@@ -6,6 +6,7 @@ import pytest
 from modmex import BaseModel, Field
 from modmex.fields import (
     FieldInfo,
+    Undefined,
     _VALIDATION_ALIASES,
     field_alias,
     field_constraints,
@@ -49,6 +50,49 @@ def test_field_returns_field_info() -> None:
     assert isinstance(field_info, FieldInfo)
     assert field_info.default == 1
     assert field_info.gt == 0
+
+
+def test_field_info_accepts_explicit_annotation() -> None:
+    field_info = FieldInfo(default=1, annotation=int)
+
+    assert field_info.annotation is int
+
+
+def test_field_info_uses_undefined_for_missing_values() -> None:
+    field_info = FieldInfo()
+
+    assert field_info.default is Undefined
+    assert field_info.default_factory is Undefined
+    assert field_info.annotation is Undefined
+
+
+def test_field_info_identifies_required_fields() -> None:
+    assert Field().is_required()
+    assert not Field(default=None).is_required()
+    assert not Field(default_factory=list).is_required()
+
+
+def test_field_info_get_default_returns_default_copy() -> None:
+    field_info = Field(default=[])
+
+    first = field_info.get_default()
+    second = field_info.get_default()
+
+    assert first == []
+    assert second == []
+    assert first is not field_info.default
+    assert first is not second
+
+
+def test_field_info_get_default_can_call_default_factory() -> None:
+    field_info = Field(default_factory=list)
+
+    assert field_info.get_default() is None
+    assert field_info.get_default(call_default_factory=True) == []
+
+
+def test_field_info_get_default_returns_undefined_for_required_field() -> None:
+    assert Field().get_default() is Undefined
 
 
 def test_field_info_can_be_specialized_for_parameter_metadata() -> None:

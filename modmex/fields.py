@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import MISSING, Field as DataclassField
+from copy import deepcopy
+from dataclasses import Field as DataclassField
 from dataclasses import field as dataclass_field
 from typing import Any, Callable
 
@@ -30,14 +31,31 @@ _FROZEN = "__modmex_frozen__"
 _FIELD_INFO = "__modmex_field_info__"
 
 
+class UndefinedType:
+    """Sentinel type for fields without an explicit value."""
+
+    def __repr__(self) -> str:
+        return "Undefined"
+
+    def __copy__(self) -> UndefinedType:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> UndefinedType:
+        return self
+
+
+Undefined = UndefinedType()
+
+
 class FieldInfo:
     """Modmex field metadata before it is adapted to a dataclass backend."""
 
     def __init__(
         self,
-        default: Any = MISSING,
+        default: Any = Undefined,
         *,
-        default_factory: Callable[[], Any] | Any = MISSING,
+        annotation: Any = Undefined,
+        default_factory: Callable[[], Any] | Any = Undefined,
         alias: str | None = None,
         validation_alias: str | Iterable[str] | None = None,
         serialization_alias: str | None = None,
@@ -79,8 +97,9 @@ class FieldInfo:
             raise ValueError("decimal_places must be greater than or equal to 0")
         if max_digits is not None and decimal_places is not None and decimal_places > max_digits:
             raise ValueError("decimal_places cannot be greater than max_digits")
-        if default is not MISSING and default_factory is not MISSING:
+        if default is not Undefined and default_factory is not Undefined:
             raise ValueError("cannot specify both default and default_factory")
+        self.annotation = annotation
         self.default = default
         self.default_factory = default_factory
         self.alias = alias
@@ -105,6 +124,18 @@ class FieldInfo:
         self.exclude_from = exclude_from
         self.metadata = metadata
         self.dataclass_kwargs = dataclass_kwargs
+
+    def is_required(self) -> bool:
+        """Check whether the field has no default value or factory."""
+        return self.default is Undefined and self.default_factory is Undefined
+
+    def get_default(self, *, call_default_factory: bool = False) -> Any:
+        """Return the default value, optionally calling the default factory."""
+        if self.default is not Undefined:
+            return deepcopy(self.default)
+        if self.default_factory is not Undefined and call_default_factory:
+            return self.default_factory()
+        return Undefined if self.default_factory is Undefined else None
 
     def as_metadata(self) -> dict[str, Any]:
         field_metadata = dict(self.metadata or {})
@@ -134,9 +165,9 @@ class FieldInfo:
     def to_dataclass_field(self) -> DataclassField[Any]:
         kwargs = dict(self.dataclass_kwargs or {})
         field_metadata = self.as_metadata()
-        if self.default is not MISSING:
+        if self.default is not Undefined:
             return dataclass_field(default=self.default, metadata=field_metadata, **kwargs)
-        if self.default_factory is not MISSING:
+        if self.default_factory is not Undefined:
             return dataclass_field(
                 default_factory=self.default_factory,
                 metadata=field_metadata,
@@ -146,9 +177,9 @@ class FieldInfo:
 
 
 def Field(
-    default: Any = MISSING,
+    default: Any = Undefined,
     *,
-    default_factory: Callable[[], Any] | Any = MISSING,
+    default_factory: Callable[[], Any] | Any = Undefined,
     alias: str | None = None,
     validation_alias: str | Iterable[str] | None = None,
     serialization_alias: str | None = None,
