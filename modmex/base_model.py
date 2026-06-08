@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import MISSING, Field as DataclassField, dataclass, fields
 import sys
-from typing import Any, Callable, get_args, get_origin
+from typing import Any, Callable, TypedDict, get_args, get_origin
 import warnings
 
 import orjson
@@ -32,6 +32,15 @@ from .validation import validate_model_constraints, validate_model_fields
 
 
 _INTERNAL_ACCESS_FLAG = "__modmex_internal_access__"
+
+
+AliasGenerator = Callable[[str], str]
+
+
+class ConfigDict(TypedDict, total=False):
+    """Model-level configuration."""
+
+    alias_generator: AliasGenerator | None
 
 
 def _internal_state(target: Any) -> dict[str, Any]:
@@ -101,6 +110,9 @@ class BaseModelMeta(type):
         model_cls.__modmex_base_model_type__ = base_model_type
         model_cls.__modmex_fields__ = model_fields
         model_cls.__modmex_field_names__ = {field.name for field in model_fields}
+        model_config = _normalize_model_config(getattr(model_cls, "model_config", None))
+        model_cls.model_config = model_config
+        alias_generator = model_config.get("alias_generator")
         validation_alias_map: dict[str, str] = {}
         serialization_name_map: dict[str, str] = {}
         deprecated_fields: dict[str, str | bool] = {}
@@ -108,6 +120,9 @@ class BaseModelMeta(type):
         has_constraints = False
         for field in model_fields:
             alias = field_alias(field)
+            generated_alias = alias_generator(field.name) if alias_generator is not None else None
+            if generated_alias is not None and not isinstance(generated_alias, str):
+                raise TypeError("alias_generator must return str or None")
             validation_aliases = field_validation_aliases(field)
             constraints = field_constraints(field)
             deprecated = field_deprecated(field)
@@ -118,7 +133,8 @@ class BaseModelMeta(type):
                 deprecated_fields[field.name] = deprecated
             if frozen:
                 frozen_fields.add(field.name)
-            input_aliases = validation_aliases or ((alias,) if alias else ())
+            default_alias = alias or generated_alias
+            input_aliases = validation_aliases or ((default_alias,) if default_alias else ())
             for alias_name in input_aliases:
                 if alias_name == field.name:
                     continue
@@ -129,7 +145,7 @@ class BaseModelMeta(type):
                         f"'{existing_field}' and '{field.name}'"
                     )
                 validation_alias_map[alias_name] = field.name
-            output_name = field_serialization_alias(field) or alias or field.name
+            output_name = field_serialization_alias(field) or default_alias or field.name
             serialization_name_map[field.name] = output_name
         model_cls.__modmex_validation_alias_map__ = validation_alias_map
         model_cls.__modmex_has_validation_aliases__ = bool(validation_alias_map)
@@ -268,6 +284,18 @@ class BaseModelMeta(type):
 
         model_cls.__init__ = new_init
         return model_cls
+
+
+def _normalize_model_config(config: Any) -> ConfigDict:
+    if config is None:
+        return {}
+    if not isinstance(config, Mapping):
+        raise TypeError("model_config must be a mapping")
+    normalized = dict(config)
+    alias_generator = normalized.get("alias_generator")
+    if alias_generator is not None and not callable(alias_generator):
+        raise TypeError("model_config.alias_generator must be callable")
+    return normalized
 
 
 class BaseModel(metaclass=BaseModelMeta):
@@ -505,6 +533,7 @@ def create_model(
     model_name: str,
     __base__: type[Any] = None,
     __module__: str | None = None,
+    __config__: Mapping[str, Any] | None = None,
     __validators__: Mapping[str, Any] | None = None,
     **field_definitions: Any,
 ) -> type[Any]:
@@ -521,6 +550,8 @@ def create_model(
             __module__ = "__main__"
 
     namespace: dict[str, Any] = {"__module__": __module__, "__annotations__": {}}
+    if __config__ is not None:
+        namespace["model_config"] = dict(__config__)
     if __validators__:
         namespace.update(__validators__)
 

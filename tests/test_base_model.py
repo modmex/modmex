@@ -11,6 +11,7 @@ import pytest
 
 from modmex import (
     BaseModel,
+    ConfigDict,
     Field,
     create_model,
     field_validator,
@@ -449,6 +450,70 @@ def test_field_name_wins_when_alias_and_field_are_both_provided() -> None:
     user = ConflictUser(first_name="Internal", firstName="External")
 
     assert user.first_name == "Internal"
+
+
+def test_alias_generator_is_applied_for_input_and_output() -> None:
+    def to_camel(field_name: str) -> str:
+        first, *rest = field_name.split("_")
+        return first + "".join(part.title() for part in rest)
+
+    class GeneratedAliasUser(BaseModel):
+        model_config = ConfigDict(alias_generator=to_camel)
+
+        first_name: str
+        last_name: str
+
+    user = GeneratedAliasUser(firstName="Ana", lastName="Diaz")
+
+    assert user.first_name == "Ana"
+    assert user.last_name == "Diaz"
+    assert user.model_dump() == {"firstName": "Ana", "lastName": "Diaz"}
+
+
+def test_field_aliases_override_alias_generator() -> None:
+    def to_camel(field_name: str) -> str:
+        first, *rest = field_name.split("_")
+        return first + "".join(part.title() for part in rest)
+
+    class GeneratedAliasUser(BaseModel):
+        model_config = ConfigDict(alias_generator=to_camel)
+
+        first_name: str = Field(alias="givenName")
+        last_name: str = Field(validation_alias="surname")
+        display_name: str = Field(serialization_alias="label")
+
+    user = GeneratedAliasUser(givenName="Ana", surname="Diaz", displayName="Ana Diaz")
+
+    assert user.first_name == "Ana"
+    assert user.last_name == "Diaz"
+    assert user.display_name == "Ana Diaz"
+    assert user.model_dump() == {
+        "givenName": "Ana",
+        "lastName": "Diaz",
+        "label": "Ana Diaz",
+    }
+
+
+def test_alias_generator_detects_duplicate_input_aliases() -> None:
+    with pytest.raises(ValueError, match="duplicate validation alias 'same'"):
+        class DuplicateAliasModel(BaseModel):
+            model_config = ConfigDict(alias_generator=lambda _: "same")
+
+            first_name: str
+            last_name: str
+
+
+def test_create_model_accepts_config_for_alias_generator() -> None:
+    DynamicUser = create_model(
+        "DynamicUserWithAliases",
+        __config__=ConfigDict(alias_generator=lambda field_name: field_name.upper()),
+        first_name=(str, ...),
+    )
+
+    user = DynamicUser(FIRST_NAME="Ana")
+
+    assert user.first_name == "Ana"
+    assert user.model_dump() == {"FIRST_NAME": "Ana"}
 
 
 def test_extra_constructor_fields_are_ignored_for_models_with_internal_hooks() -> None:

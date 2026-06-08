@@ -1,9 +1,16 @@
 from collections.abc import Mapping
 from dataclasses import field as dataclass_field
-from typing import Any, Callable, dataclass_transform
+from typing import Any, Callable, TypedDict, dataclass_transform
 
 from .fields import Field
 from .serialization import ExcludeSpec, TypeSerializers
+
+
+AliasGenerator = Callable[[str], str]
+
+
+class ConfigDict(TypedDict, total=False):
+    alias_generator: AliasGenerator | None
 
 
 def field_validator(field_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]: ...
@@ -14,6 +21,7 @@ def model_validator(mode: str = "before") -> Callable[[Callable[..., Any]], Call
 
 @dataclass_transform(kw_only_default=True, field_specifiers=(Field, dataclass_field))
 class BaseModel:
+    model_config: ConfigDict
     def __post_init__(self) -> None: ...
     def model_dump(
         self,
@@ -37,7 +45,7 @@ def create_model(
     model_name: str,
     __base__: type[BaseModel] | None = None,
     __module__: str | None = None,
+    __config__: Mapping[str, Any] | None = None,
     __validators__: Mapping[str, Any] | None = None,
     **field_definitions: Any,
 ) -> type[BaseModel]: ...
-
