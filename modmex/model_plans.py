@@ -10,6 +10,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Callable, Literal, get_args, get_origin
+from uuid import UUID
 
 from .fields import should_exclude_field
 from .serialization import serialize_value
@@ -66,7 +67,7 @@ def _build_dump_plan(
         serializer = _dump_serializer_for(field_type, globalns, base_model_type, profile)
         if serializer is None:
             return None
-        default_fast_types = (datetime, date, time, timedelta, Decimal)
+        default_fast_types = (datetime, date, time, timedelta, Decimal, UUID)
         has_serialized_default = field.default is not MISSING and field_type in default_fast_types
         serialized_default = serialize_value(field.default) if has_serialized_default else None
         output_name = output_name_map.get(field.name, field.name) if output_name_map else field.name
@@ -113,6 +114,8 @@ def _dump_serializer_for(
         return _total_seconds
     if expected_type is Decimal:
         return float
+    if expected_type is UUID:
+        return str
     if isinstance(expected_type, type):
         if issubclass(expected_type, Enum):
             enum_values = {member: member.value for member in expected_type}

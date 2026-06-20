@@ -6,6 +6,7 @@ from decimal import Decimal
 from enum import Enum
 import warnings
 from typing import Annotated, Any, Literal, Optional
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -286,6 +287,44 @@ def test_model_dump_supports_float_to_decimal_type_serializer() -> None:
     )
 
     assert dumped["amount"] == Decimal("10.25")
+
+
+def test_model_dump_serializes_uuid_values_to_strings() -> None:
+    identifier = UUID("12345678-1234-5678-1234-567812345678")
+
+    class Event(BaseModel):
+        id: UUID
+        optional_id: UUID | None = None
+        related_ids: list[UUID] = field(default_factory=list)
+        metadata: dict[str, UUID] = field(default_factory=dict)
+
+        @property
+        def trace_id(self) -> UUID:
+            return identifier
+
+    event = Event(
+        id=identifier,
+        optional_id=identifier,
+        related_ids=[identifier],
+        metadata={"source": identifier},
+    )
+
+    assert event.model_dump() == {
+        "id": str(identifier),
+        "optional_id": str(identifier),
+        "related_ids": [str(identifier)],
+        "metadata": {"source": str(identifier)},
+        "trace_id": str(identifier),
+    }
+
+
+def test_model_dump_json_serializes_uuid_values_to_strings() -> None:
+    identifier = uuid4()
+
+    class Event(BaseModel):
+        id: UUID
+
+    assert Event(id=identifier).model_dump_json() == f'{{"id":"{identifier}"}}'
 
 
 def test_model_dump_json_supports_type_serializers_for_specific_types() -> None:

@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Callable
+from uuid import UUID
 
 ExcludeSpec = str | Iterable[str] | Mapping[str, Any] | None
 TypeSerializer = Callable[[Any], Any]
@@ -106,6 +107,8 @@ def serialize_value(
         return value.value
     if isinstance(value, Decimal):
         return float(value)
+    if isinstance(value, UUID):
+        return str(value)
     return value
 
 
@@ -123,4 +126,6 @@ def custom_serializer(obj: Any) -> Any:
         return obj.total_seconds()
     if isinstance(obj, Decimal):
         return float(obj)
+    if isinstance(obj, UUID):
+        return str(obj)
     raise TypeError(f"Type {type(obj)} not serializable")
