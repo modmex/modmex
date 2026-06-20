@@ -1,6 +1,7 @@
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -75,10 +76,13 @@ def test_serialize_value_handles_tuples() -> None:
 
 
 def test_serialize_value_handles_supported_builtin_types() -> None:
+    identifier = uuid4()
+
     assert serialize_value(date(2026, 1, 1)) == "2026-01-01"
     assert serialize_value(time(8, 30)) == "08:30:00"
     assert serialize_value(timedelta(seconds=10)) == 10
     assert serialize_value(Decimal("1.5")) == 1.5
+    assert serialize_value(identifier) == str(identifier)
     assert serialize_value(object()) is not None
 
 
@@ -92,12 +96,15 @@ def test_serialize_value_applies_type_serializers_before_builtin_serialization()
 
 
 def test_custom_serializer_handles_supported_types_and_errors() -> None:
+    identifier = UUID("12345678-1234-5678-1234-567812345678")
+
     assert custom_serializer(Kind.ADMIN) == "admin"
     assert custom_serializer(datetime(2026, 1, 1, 0, 0, 0)) == "2026-01-01T00:00:00"
     assert custom_serializer(date(2026, 1, 1)) == "2026-01-01"
     assert custom_serializer(time(8, 30)) == "08:30:00"
     assert custom_serializer(timedelta(seconds=10)) == 10
     assert custom_serializer(Decimal("1.5")) == 1.5
+    assert custom_serializer(identifier) == "12345678-1234-5678-1234-567812345678"
 
     with pytest.raises(TypeError, match="not serializable"):
         custom_serializer(object())
