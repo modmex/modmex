@@ -14,14 +14,19 @@ TypeSerializer = Callable[[Any], Any]
 TypeSerializers = Mapping[type[Any], TypeSerializer] | None
 
 
-def _serialize_by_type(value: Any, type_serializers: TypeSerializers) -> Any:
+def _matching_type_serializer(value: Any, type_serializers: TypeSerializers) -> TypeSerializer | None:
     if not type_serializers:
-        return value
+        return None
 
     for expected_type, serializer in type_serializers.items():
         if isinstance(value, expected_type):
-            return serializer(value)
-    return value
+            return serializer
+    return None
+
+
+def _serialize_by_type(value: Any, type_serializers: TypeSerializers) -> Any:
+    serializer = _matching_type_serializer(value, type_serializers)
+    return serializer(value) if serializer is not None else value
 
 
 def normalize_exclude(exclude: ExcludeSpec) -> dict[str, Any]:
@@ -46,7 +51,9 @@ def serialize_value(
     type_serializers: TypeSerializers = None,
 ) -> Any:
     if type_serializers:
-        value = _serialize_by_type(value, type_serializers)
+        serializer = _matching_type_serializer(value, type_serializers)
+        if serializer is not None:
+            return _serialize_by_type(value, type_serializers)
     elif value is None or type(value) in (str, int, float, bool):
         return value
 
