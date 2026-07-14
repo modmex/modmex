@@ -202,7 +202,7 @@ def Field(
     exclude_from: Iterable[str] | None = None,
     metadata: Mapping[str, Any] | None = None,
     **kwargs: Any,
-) -> FieldInfo:
+) -> Any:
     """Create modmex field metadata."""
     return FieldInfo(
         default=default,
