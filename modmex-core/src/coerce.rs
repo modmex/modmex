@@ -235,7 +235,7 @@ pub(crate) fn coerce_duration_with_helper(
             && micros <= i32::MAX as f64
         {
             let timedelta = py.import_bound("datetime")?.getattr("timedelta")?;
-            return Ok(timedelta.call1((0, whole as i32, micros as i32, true))?.into_py(py));
+            return Ok(timedelta.call1((0, whole as i32, micros as i32))?.into_py(py));
         }
         let cls = if let Some(helper) = helper {
             helper.clone()
