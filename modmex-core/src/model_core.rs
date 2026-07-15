@@ -192,11 +192,8 @@ impl ModelCore {
 
         for field in &self.fields {
             let name = field.py_name.bind(py);
-            let value = if let Some(raw) = kwargs.get_item(name)? {
-                let Some(validated) = validate_value(py, &raw, &field.validator)? else {
-                    return Ok(None);
-                };
-                validated
+            let raw = if let Some(raw) = kwargs.get_item(name)? {
+                raw.into_py(py)
             } else if let Some(default) = &field.default {
                 default.clone_ref(py)
             } else if let Some(default_factory) = &field.default_factory {
@@ -206,7 +203,10 @@ impl ModelCore {
             } else {
                 py_none(py)
             };
-            state.set_item(name, value.bind(py))?;
+            let Some(validated) = validate_value(py, raw.bind(py), &field.validator)? else {
+                return Ok(None);
+            };
+            state.set_item(name, validated.bind(py))?;
         }
 
         Ok(Some(state.unbind()))

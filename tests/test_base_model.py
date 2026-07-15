@@ -84,6 +84,15 @@ def test_model_coerces_supported_field_types() -> None:
     assert user.trial_duration == timedelta(seconds=90)
 
 
+def test_model_validates_default_values() -> None:
+    class InvalidDefault(BaseModel):
+        name: str | None
+        status: Literal["active", "inactive"] = "bad"
+
+    with pytest.raises(ValidationError, match="must be one of"):
+        InvalidDefault(name="Alice")
+
+
 def test_model_dump_serializes_nested_values_and_properties() -> None:
     user = User(id=1, name="Ana", address=Address(zipcode=90210))
 
