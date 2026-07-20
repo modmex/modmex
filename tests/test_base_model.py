@@ -84,6 +84,26 @@ def test_model_coerces_supported_field_types() -> None:
     assert user.trial_duration == timedelta(seconds=90)
 
 
+def test_model_accepts_assigned_none_for_optional_datetime_fields() -> None:
+    class Event(BaseModel):
+        legacy: Optional[datetime] = None
+        modern: datetime | None = None
+
+    explicit_none = Event(legacy=None, modern=None)
+
+    assert explicit_none.legacy is None
+    assert explicit_none.modern is None
+
+    model = Event(legacy=datetime(2026, 1, 1), modern=datetime(2026, 1, 2))
+    model.legacy = None
+    model.modern = None
+
+    model._validate_types()
+
+    assert model.legacy is None
+    assert model.modern is None
+
+
 def test_model_validates_default_values() -> None:
     class InvalidDefault(BaseModel):
         name: str | None
