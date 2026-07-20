@@ -310,8 +310,12 @@ def _validate_literal(expected_type: Any, value: Any, loc: Loc) -> Any:
 
 
 def _validate_union(expected_type: Any, value: Any, strict: bool, globalns: GlobalNS_T, loc: Loc) -> Any:
+    union_types = get_args(expected_type)
+    if value is None and any(is_none_type(item_type) for item_type in union_types):
+        return None
+
     errors: list[dict[str, Any]] = []
-    for item_type in get_args(expected_type):
+    for item_type in union_types:
         try:
             return _validate_types(item_type, value, strict, globalns, loc)
         except ValidationError as exc:
@@ -439,9 +443,14 @@ def _compile_validator(expected_type: Any, strict: bool, globalns: GlobalNS_T) -
         return validate_literal
 
     if origin in (typing.Union, types.UnionType):
-        item_validators = tuple(_compile_validator(item_type, strict, globalns) for item_type in get_args(expected_type))
+        union_types = get_args(expected_type)
+        accepts_none = any(is_none_type(item_type) for item_type in union_types)
+        item_validators = tuple(_compile_validator(item_type, strict, globalns) for item_type in union_types)
 
         def validate_union(value: Any, loc: Loc) -> Any:
+            if value is None and accepts_none:
+                return None
+
             errors: list[dict[str, Any]] = []
             for item_validator in item_validators:
                 try:
