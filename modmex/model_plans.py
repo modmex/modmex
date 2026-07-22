@@ -14,6 +14,7 @@ from uuid import UUID
 
 from .fields import should_exclude_field
 from .serialization import serialize_value
+from .type_resolution import resolve_model_type_hints
 
 KIND_STR = 1
 KIND_INT = 2
@@ -58,6 +59,7 @@ def _build_dump_plan(
         type_hints = typing.get_type_hints(model_cls, globalns=globalns, include_extras=True)
     except Exception:
         type_hints = {}
+    type_hints = resolve_model_type_hints(model_cls, type_hints)
 
     output_items: list[tuple[str, Callable[[Any], Any], bool, Any, Any]] = []
     for field in model_fields:
@@ -202,6 +204,7 @@ def _rust_schema_for(
         type_hints = typing.get_type_hints(model_cls, globalns=globalns, include_extras=True)
     except Exception:
         type_hints = {}
+    type_hints = resolve_model_type_hints(model_cls, type_hints)
 
     schema: dict[str, Any] = {}
     for field in model_fields:

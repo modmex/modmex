@@ -38,6 +38,7 @@ from .model_plans import (
     _rust_schema_for,
 )
 from .serialization import ExcludeSpec, TypeSerializers, custom_serializer, normalize_exclude, serialize_value
+from .type_resolution import resolve_model_type_hints, resolve_typevars
 from .validation import validate_model_constraints, validate_model_fields
 
 
@@ -171,6 +172,7 @@ class BaseModelMeta(type):
         model_cls.__modmex_dump_field_cache__ = {}
         model_cls.__modmex_dump_plan_cache__ = {}
         model_cls.__modmex_dump_plan_alias_cache__ = {}
+        model_cls.__modmex_generic_cache__ = {}
         model_cls.__modmex_properties__ = tuple(
             attr_name
             for attr_name in dir(model_cls)
@@ -326,6 +328,40 @@ class BaseModel(metaclass=BaseModelMeta):
             return
 
         self._run_validation_lifecycle()
+
+    def __class_getitem__(cls, type_arguments: Any) -> type[Any]:
+        """Create and cache a concrete Modmex model for generic arguments."""
+
+        parameters = getattr(cls, "__parameters__", ())
+        if not parameters:
+            raise TypeError(f"{cls.__name__} is not a generic model")
+        arguments = type_arguments if isinstance(type_arguments, tuple) else (type_arguments,)
+        if len(arguments) != len(parameters):
+            raise TypeError(
+                f"{cls.__name__} expects {len(parameters)} type argument(s), got {len(arguments)}"
+            )
+        cache = cls.__modmex_generic_cache__
+        if arguments in cache:
+            return cache[arguments]
+
+        argument_names = ", ".join(getattr(argument, "__name__", str(argument)) for argument in arguments)
+        new_bindings = dict(zip(parameters, arguments))
+        inherited_bindings = getattr(cls, "__modmex_explicit_typevar_map__", {})
+        concrete_bindings = {
+            parameter: resolve_typevars(argument, new_bindings)
+            for parameter, argument in inherited_bindings.items()
+        }
+        concrete_bindings.update(new_bindings)
+        specialized = BaseModelMeta(
+            f"{cls.__name__}[{argument_names}]",
+            (cls,),
+            {
+                "__module__": cls.__module__,
+                "__modmex_explicit_typevar_map__": concrete_bindings,
+            },
+        )
+        cache[arguments] = specialized
+        return specialized
 
     @classmethod
     def model_json_schema(cls) -> dict[str, Any]:
@@ -564,6 +600,7 @@ class _JsonSchemaBuilder:
                     except Exception:
                         pass
                 type_hints[model_field.name] = annotation
+        type_hints = resolve_model_type_hints(model_cls, type_hints)
 
         properties: dict[str, Any] = {}
         required_names = set(model_cls.__modmex_required_field_names__)
