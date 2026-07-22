@@ -628,6 +628,10 @@ class _JsonSchemaBuilder:
     def _type_schema(self, annotation: Any, field_name: str) -> dict[str, Any]:
         if annotation is Any:
             return {}
+        if annotation is list:
+            return {"type": "array"}
+        if annotation is dict:
+            return {"type": "object", "additionalProperties": {}}
         json_type = _JSON_TYPE_BY_PYTHON_TYPE.get(annotation)
         if json_type is not None:
             return {"type": json_type}

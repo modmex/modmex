@@ -169,6 +169,8 @@ def test_model_json_schema_supports_standard_formats_and_container_shapes() -> N
         pair: tuple[str, int]
         values: tuple[int, ...]
         tags: set[str]
+        arbitrary_values: list
+        metadata: dict
 
     properties = RichTypesModel.model_json_schema()["properties"]
 
@@ -189,6 +191,11 @@ def test_model_json_schema_supports_standard_formats_and_container_shapes() -> N
         "type": "array",
         "items": {"type": "string"},
         "uniqueItems": True,
+    }
+    assert properties["arbitrary_values"] == {"type": "array"}
+    assert properties["metadata"] == {
+        "type": "object",
+        "additionalProperties": {},
     }
 
 
