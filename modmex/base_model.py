@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable as CallableABC
 from collections.abc import Mapping
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import MISSING, Field as DataclassField, dataclass, fields
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+from enum import Enum
 import sys
-from typing import Any, Callable, TypedDict, get_args, get_origin
+import types
+import typing
+from typing import Any, Callable, Literal, TypedDict, get_args, get_origin
+from uuid import UUID
 import warnings
 
 import orjson
@@ -17,10 +25,12 @@ from .fields import (
     field_constraints,
     field_deprecated,
     field_frozen,
+    field_info,
     field_serialization_alias,
     field_validation_aliases,
     should_exclude_field,
 )
+from .errors import UnsupportedJsonSchemaTypeError
 from . import rust_backend
 from .model_plans import (
     _dump_plan_for,
@@ -28,6 +38,7 @@ from .model_plans import (
     _rust_schema_for,
 )
 from .serialization import ExcludeSpec, TypeSerializers, custom_serializer, normalize_exclude, serialize_value
+from .type_resolution import resolve_model_type_hints, resolve_typevars
 from .validation import validate_model_constraints, validate_model_fields
 
 
@@ -161,6 +172,7 @@ class BaseModelMeta(type):
         model_cls.__modmex_dump_field_cache__ = {}
         model_cls.__modmex_dump_plan_cache__ = {}
         model_cls.__modmex_dump_plan_alias_cache__ = {}
+        model_cls.__modmex_generic_cache__ = {}
         model_cls.__modmex_properties__ = tuple(
             attr_name
             for attr_name in dir(model_cls)
@@ -316,6 +328,46 @@ class BaseModel(metaclass=BaseModelMeta):
             return
 
         self._run_validation_lifecycle()
+
+    def __class_getitem__(cls, type_arguments: Any) -> type[Any]:
+        """Create and cache a concrete Modmex model for generic arguments."""
+
+        parameters = getattr(cls, "__parameters__", ())
+        if not parameters:
+            raise TypeError(f"{cls.__name__} is not a generic model")
+        arguments = type_arguments if isinstance(type_arguments, tuple) else (type_arguments,)
+        if len(arguments) != len(parameters):
+            raise TypeError(
+                f"{cls.__name__} expects {len(parameters)} type argument(s), got {len(arguments)}"
+            )
+        cache = cls.__modmex_generic_cache__
+        if arguments in cache:
+            return cache[arguments]
+
+        argument_names = ", ".join(getattr(argument, "__name__", str(argument)) for argument in arguments)
+        new_bindings = dict(zip(parameters, arguments))
+        inherited_bindings = getattr(cls, "__modmex_explicit_typevar_map__", {})
+        concrete_bindings = {
+            parameter: resolve_typevars(argument, new_bindings)
+            for parameter, argument in inherited_bindings.items()
+        }
+        concrete_bindings.update(new_bindings)
+        specialized = BaseModelMeta(
+            f"{cls.__name__}[{argument_names}]",
+            (cls,),
+            {
+                "__module__": cls.__module__,
+                "__modmex_explicit_typevar_map__": concrete_bindings,
+            },
+        )
+        cache[arguments] = specialized
+        return specialized
+
+    @classmethod
+    def model_json_schema(cls) -> dict[str, Any]:
+        """Return a provider-neutral JSON Schema for this model."""
+
+        return _JsonSchemaBuilder(cls).build()
 
     def _validate_types(self) -> None:
         validate_model_fields(self)
@@ -486,6 +538,277 @@ class BaseModel(metaclass=BaseModelMeta):
             option=orjson.OPT_PASSTHROUGH_DATETIME,
             default=custom_serializer,
         ).decode("utf-8")
+
+
+_JSON_TYPE_BY_PYTHON_TYPE = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+    type(None): "null",
+}
+
+
+def _json_default(value: Any) -> Any:
+    """Convert declared defaults without ever evaluating a default factory."""
+
+    if isinstance(value, Enum):
+        return _json_default(value.value)
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if hasattr(value, "model_dump") and callable(value.model_dump):
+        return value.model_dump()
+    if isinstance(value, (tuple, set, frozenset)):
+        return [_json_default(item) for item in value]
+    if isinstance(value, list):
+        return [_json_default(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_default(item) for key, item in value.items()}
+    return value
+
+
+class _JsonSchemaBuilder:
+    def __init__(self, root_model: type[Any]) -> None:
+        self.root_model = root_model
+        self.defs: dict[str, dict[str, Any]] = {}
+        self._definition_names: dict[type[Any], str] = {}
+        self._building: set[type[Any]] = set()
+
+    def build(self) -> dict[str, Any]:
+        schema = self._model_schema(self.root_model)
+        if self.defs:
+            schema["$defs"] = self.defs
+        return schema
+
+    def _model_schema(self, model_cls: type[Any]) -> dict[str, Any]:
+        globalns = vars(sys.modules[model_cls.__module__])
+        try:
+            type_hints = typing.get_type_hints(model_cls, globalns=globalns, include_extras=True)
+        except Exception:
+            type_hints = {}
+            for model_field in model_cls.__modmex_fields__:
+                annotation = model_field.type
+                if isinstance(annotation, str):
+                    try:
+                        annotation = eval(annotation, globalns, vars(model_cls))
+                    except Exception:
+                        pass
+                type_hints[model_field.name] = annotation
+        type_hints = resolve_model_type_hints(model_cls, type_hints)
+
+        properties: dict[str, Any] = {}
+        required_names = set(model_cls.__modmex_required_field_names__)
+        required: list[str] = []
+        output_names = model_cls.__modmex_serialization_name_map__
+        for model_field in model_cls.__modmex_fields__:
+            output_name = output_names.get(model_field.name, model_field.name)
+            annotation = type_hints.get(model_field.name, model_field.type)
+            field_schema = self._type_schema(annotation, model_field.name)
+            self._apply_field_metadata(field_schema, model_field)
+            if model_field.default is not MISSING:
+                field_schema["default"] = _json_default(model_field.default)
+            properties[output_name] = field_schema
+            if model_field.name in required_names:
+                required.append(output_name)
+
+        return {
+            "title": model_cls.__name__,
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        }
+
+    def _type_schema(self, annotation: Any, field_name: str) -> dict[str, Any]:
+        if annotation is Any:
+            return {}
+        json_type = _JSON_TYPE_BY_PYTHON_TYPE.get(annotation)
+        if json_type is not None:
+            return {"type": json_type}
+        if isinstance(annotation, type) and issubclass(annotation, Enum):
+            values = [_json_default(member.value) for member in annotation]
+            schema: dict[str, Any] = {"enum": values}
+            value_types = {
+                _JSON_TYPE_BY_PYTHON_TYPE.get(type(value))
+                for value in values
+                if value is not None
+            }
+            if len(value_types) == 1 and None not in value_types:
+                schema["type"] = value_types.pop()
+            return schema
+        if isinstance(annotation, type) and hasattr(annotation, "__modmex_fields__"):
+            return self._model_ref(annotation)
+
+        if annotation is datetime:
+            return {"type": "string", "format": "date-time"}
+        if annotation is date:
+            return {"type": "string", "format": "date"}
+        if annotation is time:
+            return {"type": "string", "format": "time"}
+        if annotation is timedelta:
+            # Modmex serializes timedeltas as seconds.
+            return {"type": "number"}
+        if annotation is Decimal:
+            return {"type": "number"}
+        if annotation is UUID:
+            return {"type": "string", "format": "uuid"}
+
+        origin = get_origin(annotation)
+        args = get_args(annotation)
+        if origin is typing.Annotated:
+            if not args:
+                self._unsupported_type(field_name, annotation)
+            return self._type_schema(args[0], field_name)
+        if origin is Literal:
+            values = [_json_default(value) for value in args]
+            schema = {"enum": values}
+            literal_types = {_JSON_TYPE_BY_PYTHON_TYPE.get(type(value)) for value in values}
+            if None not in literal_types and len(literal_types) == 1:
+                schema["type"] = literal_types.pop()
+            return schema
+        if origin in (list, typing.List):
+            return {
+                "type": "array",
+                "items": self._type_schema(args[0], field_name) if args else {},
+            }
+        if origin is tuple:
+            if not args:
+                return {"type": "array"}
+            if len(args) == 2 and args[1] is Ellipsis:
+                return {"type": "array", "items": self._type_schema(args[0], field_name)}
+            return {
+                "type": "array",
+                "prefixItems": [self._type_schema(arg, field_name) for arg in args],
+                "minItems": len(args),
+                "maxItems": len(args),
+            }
+        if origin in (set, frozenset):
+            return {
+                "type": "array",
+                "items": self._type_schema(args[0], field_name) if args else {},
+                "uniqueItems": True,
+            }
+        if origin in (dict, typing.Dict):
+            value_schema = self._type_schema(args[1], field_name) if len(args) == 2 else {}
+            return {"type": "object", "additionalProperties": value_schema}
+        if origin in (typing.Union, types.UnionType):
+            variants = [self._type_schema(arg, field_name) for arg in args]
+            if all(set(variant) == {"type"} and isinstance(variant["type"], str) for variant in variants):
+                return {"type": [variant["type"] for variant in variants]}
+            return {"anyOf": variants}
+        if origin in (Callable, CallableABC):
+            self._unsupported_type(field_name, annotation)
+
+        if isinstance(annotation, type):
+            hook = getattr(annotation, "__modmex_json_schema__", None)
+            if callable(hook):
+                schema = hook()
+                if not isinstance(schema, dict):
+                    raise UnsupportedJsonSchemaTypeError(
+                        f"Cannot generate JSON Schema for field '{field_name}': "
+                        f"{annotation.__name__}.__modmex_json_schema__() must return a JSON Schema object."
+                    )
+                try:
+                    orjson.dumps(schema)
+                except (TypeError, ValueError) as exc:
+                    raise UnsupportedJsonSchemaTypeError(
+                        f"Cannot generate JSON Schema for field '{field_name}': "
+                        f"{annotation.__name__}.__modmex_json_schema__() must return a JSON-serializable "
+                        "JSON Schema object."
+                    ) from exc
+                return deepcopy(schema)
+
+        self._unsupported_type(field_name, annotation)
+
+    @staticmethod
+    def _unsupported_type(field_name: str, annotation: Any) -> typing.NoReturn:
+        type_name = getattr(annotation, "__name__", str(annotation))
+        raise UnsupportedJsonSchemaTypeError(
+            f"Cannot generate JSON Schema for field '{field_name}': "
+            f"{type_name} has no JSON Schema representation."
+        )
+
+    def _apply_field_metadata(self, schema: dict[str, Any], model_field: Any) -> None:
+        info = field_info(model_field)
+        if info is not None:
+            if info.title is not None:
+                schema["title"] = info.title
+            if info.description is not None:
+                schema["description"] = info.description
+            if info.examples is not None:
+                schema["examples"] = [_json_default(example) for example in info.examples]
+            if info.deprecated:
+                schema["deprecated"] = True
+
+        constraints = field_constraints(model_field)
+        keyword_map = {
+            "gt": "exclusiveMinimum",
+            "ge": "minimum",
+            "lt": "exclusiveMaximum",
+            "le": "maximum",
+            "multiple_of": "multipleOf",
+            "pattern": "pattern",
+        }
+        for constraint_name, keyword in keyword_map.items():
+            value = constraints[constraint_name]
+            if value is not None:
+                schema[keyword] = value
+
+        schema_type = schema.get("type")
+        min_length = constraints["min_length"]
+        max_length = constraints["max_length"]
+        schema_types = {schema_type} if isinstance(schema_type, str) else set(schema_type or ())
+        if "string" in schema_types:
+            if min_length is not None:
+                schema["minLength"] = min_length
+            if max_length is not None:
+                schema["maxLength"] = max_length
+        elif "array" in schema_types:
+            if min_length is not None:
+                schema["minItems"] = min_length
+            if max_length is not None:
+                schema["maxItems"] = max_length
+        elif "object" in schema_types:
+            if min_length is not None:
+                schema["minProperties"] = min_length
+            if max_length is not None:
+                schema["maxProperties"] = max_length
+
+        decimal_places = constraints["decimal_places"]
+        if decimal_places is not None and "multipleOf" not in schema:
+            schema["multipleOf"] = float(Decimal(1).scaleb(-decimal_places))
+        max_digits = constraints["max_digits"]
+        if max_digits is not None:
+            integer_digits = max_digits - (decimal_places or 0)
+            bound = 10 ** integer_digits
+            schema["exclusiveMinimum"] = -bound
+            schema["exclusiveMaximum"] = bound
+
+    def _model_ref(self, model_cls: type[Any]) -> dict[str, str]:
+        if model_cls is self.root_model:
+            return {"$ref": "#"}
+        name = self._definition_names.get(model_cls)
+        if name is None:
+            base_name = model_cls.__name__
+            name = base_name
+            suffix = 2
+            while name in self.defs:
+                name = f"{base_name}_{suffix}"
+                suffix += 1
+            self._definition_names[model_cls] = name
+        if model_cls not in self._building and name not in self.defs:
+            self._building.add(model_cls)
+            # Reserve the key before descending so mutually recursive models terminate.
+            self.defs[name] = {}
+            self.defs[name] = self._model_schema(model_cls)
+            self._building.remove(model_cls)
+        return {"$ref": f"#/$defs/{name}"}
 
 
 def _dump_fields_for(model_cls: type[Any], profile: str | None, include_excluded: bool) -> tuple[Any, ...]:

@@ -18,6 +18,7 @@ from typing import Any, Callable, Literal, get_args, get_origin
 from .datetime_parser import parse_date, parse_datetime, parse_duration, parse_time
 from .errors import ValidationError
 from .fields import field_constraints
+from .type_resolution import resolve_model_type_hints
 
 GlobalNS_T = dict[str, Any]
 Loc = list[str | int]
@@ -541,6 +542,7 @@ def _validation_schema(
         type_hints = typing.get_type_hints(model_cls, globalns=globalns, include_extras=True)
     except Exception:
         type_hints = {}
+    type_hints = resolve_model_type_hints(model_cls, type_hints)
     return tuple(
         (
             field.name,

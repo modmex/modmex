@@ -22,7 +22,10 @@ def model_validator(mode: str = "before") -> Callable[[Callable[..., Any]], Call
 @dataclass_transform(kw_only_default=True, field_specifiers=(Field, dataclass_field))
 class BaseModel:
     model_config: ConfigDict
+    def __class_getitem__(cls, type_arguments: Any) -> type[Any]: ...
     def __post_init__(self) -> None: ...
+    @classmethod
+    def model_json_schema(cls) -> dict[str, Any]: ...
     def model_dump(
         self,
         *,
