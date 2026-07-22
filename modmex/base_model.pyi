@@ -23,6 +23,8 @@ def model_validator(mode: str = "before") -> Callable[[Callable[..., Any]], Call
 class BaseModel:
     model_config: ConfigDict
     def __post_init__(self) -> None: ...
+    @classmethod
+    def model_json_schema(cls) -> dict[str, Any]: ...
     def model_dump(
         self,
         *,
