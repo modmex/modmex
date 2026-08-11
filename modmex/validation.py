@@ -35,6 +35,25 @@ def is_none_type(tp: Any) -> bool:
     return tp in _NONE_TYPES
 
 
+def _exact_union_type(union_types: tuple[Any, ...], value: Any) -> Any | None:
+    """Return an already-matching union branch before permissive coercion.
+
+    Union validation historically tried branches in declaration order.  That
+    made ``str | int`` turn an integer into a string before the integer branch
+    could be considered.  Preserve values whose runtime type already matches
+    a branch, while retaining the existing coercive fallback for values that
+    do not match any branch exactly.
+    """
+    for item_type in union_types:
+        if not isinstance(item_type, type):
+            continue
+        if item_type is int and isinstance(value, bool):
+            continue
+        if isinstance(value, item_type):
+            return item_type
+    return None
+
+
 def str_validator(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -315,6 +334,10 @@ def _validate_union(expected_type: Any, value: Any, strict: bool, globalns: Glob
     if value is None and any(is_none_type(item_type) for item_type in union_types):
         return None
 
+    exact_type = _exact_union_type(union_types, value)
+    if exact_type is not None:
+        return value
+
     errors: list[dict[str, Any]] = []
     for item_type in union_types:
         try:
@@ -451,6 +474,10 @@ def _compile_validator(expected_type: Any, strict: bool, globalns: GlobalNS_T) -
         def validate_union(value: Any, loc: Loc) -> Any:
             if value is None and accepts_none:
                 return None
+
+            exact_type = _exact_union_type(union_types, value)
+            if exact_type is not None:
+                return value
 
             errors: list[dict[str, Any]] = []
             for item_validator in item_validators:
