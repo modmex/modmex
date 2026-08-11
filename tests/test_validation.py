@@ -85,6 +85,16 @@ def test_validate_model_fields_handles_none_type_and_enum_parsing() -> None:
     assert ("role",) in locations
 
 
+def test_union_preserves_exact_runtime_types_before_coercion() -> None:
+    class IdentifierModel(BaseModel):
+        value: str | int
+
+    assert IdentifierModel(value=42).value == 42
+    assert type(IdentifierModel(value=42).value) is int
+    assert IdentifierModel(value="42").value == "42"
+    assert type(IdentifierModel(value="42").value) is str
+
+
 def test_low_level_validators_and_type_paths() -> None:
     class Label(Enum):
         ADMIN = "admin"
