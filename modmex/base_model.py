@@ -527,7 +527,11 @@ class BaseModel(metaclass=BaseModelMeta):
                     type(self).__modmex_serialization_name_map__,
                 )
             if dump_plan is not None:
-                return orjson.dumps(dump_plan(self)).decode("utf-8")
+                return orjson.dumps(
+                    dump_plan(self),
+                    option=orjson.OPT_PASSTHROUGH_DATETIME,
+                    default=custom_serializer,
+                ).decode("utf-8")
         return orjson.dumps(
             self.model_dump(
                 exclude=exclude,
