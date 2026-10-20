@@ -5,6 +5,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 import warnings
+import json
 from typing import Annotated, Any, Literal, Optional
 from uuid import UUID, uuid4
 
@@ -354,6 +355,42 @@ def test_model_dump_json_serializes_uuid_values_to_strings() -> None:
         id: UUID
 
     assert Event(id=identifier).model_dump_json() == f'{{"id":"{identifier}"}}'
+
+
+@pytest.mark.parametrize("amount", [Decimal("2900"), Decimal("3.008")])
+@pytest.mark.parametrize("dump_mode", ["native", "fallback", "planned"])
+def test_model_dump_json_serializes_decimal_in_dynamic_nested_context(
+    amount, dump_mode, monkeypatch,
+) -> None:
+    class Command(BaseModel):
+        business_context: dict[str, Any]
+
+    command = Command(business_context={
+        "target_rate_amount": amount,
+        "brief": {"offers": [{"amount": amount}]},
+    })
+    if dump_mode == "fallback":
+        monkeypatch.setattr(Command, "__modmex_dump_plan__", None)
+    elif dump_mode == "planned":
+        # Exercise the optimized JSON branch even on runtimes where a native
+        # dump plan cannot be compiled for this model.
+        monkeypatch.setattr(
+            Command,
+            "__modmex_dump_plan__",
+            lambda model: {"business_context": model.business_context},
+        )
+    expected = {
+        "business_context": {
+            "target_rate_amount": float(amount),
+            "brief": {"offers": [{"amount": float(amount)}]},
+        },
+    }
+    assert json.loads(command.model_dump_json()) == expected
+    assert command.model_dump_json() == command.model_dump_json(include_excluded=True)
+    assert command.business_context["target_rate_amount"] is amount
+    assert json.loads(command.model_dump_json(type_serializers={Decimal: str}))[
+        "business_context"
+    ]["brief"]["offers"][0]["amount"] == str(amount)
 
 
 def test_model_dump_json_supports_type_serializers_for_specific_types() -> None:
